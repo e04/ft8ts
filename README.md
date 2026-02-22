@@ -95,6 +95,10 @@ for (const d of decoded) {
 | `depth` | 2 | Decoding depth: 1=fast BP only, 2=BP+OSD, 3=deep |
 | `maxCandidates` | 300 | Maximum candidates to process |
 
+## ToDo
+
+- [ ] Add save_hash_call-style hash tables to the TypeScript port so that h10/h12/h22 hash references can be resolved to callsigns (e.g. <YW18FIFA>) instead of always showing <...>.
+
 ## Build
 
 ```bash
