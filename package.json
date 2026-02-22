@@ -1,0 +1,53 @@
+{
+  "name": "@e04/ft8ts",
+  "version": "0.0.1",
+  "description": "FT8 encoder/decoder in pure TypeScript",
+  "keywords": [
+    "ft8",
+    "sdr",
+    "ham radio",
+    "amateur radio"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/e04/ft8ts.git"
+  },
+  "main": "dist/ft8ts.cjs",
+  "module": "dist/ft8ts.mjs",
+  "types": "./dist/ft8ts.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/ft8ts.d.ts",
+      "import": "./dist/ft8ts.mjs",
+      "require": "./dist/ft8ts.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "rollup -c",
+    "test": "vitest",
+    "lint": "biome check --write .",
+    "format": "biome format --write .",
+    "demo": "npx --yes serve . -p 3000"
+  },
+  "author": "e04",
+  "license": "GPL-3.0",
+  "type": "module",
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.4",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@rollup/plugin-typescript": "^12.3.0",
+    "@types/node": "^25.3.0",
+    "rollup": "^4.59.0",
+    "rollup-plugin-dts": "^6.3.0",
+    "tslib": "^2.8.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  },
+  "files": [
+    "dist",
+    "src",
+    "example"
+  ]
+}
