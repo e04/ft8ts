@@ -61,6 +61,7 @@ npx tsx example/decode-ft8-wav.ts ./src/__test__/190227_155815.wav [--low 200] [
 
 ### Browser Demo
 
+https://e04.github.io/ft8ts/example/browser/index.html
 
 ## Build
 
