@@ -7,8 +7,8 @@
  *   npx tsx src/test_full.ts
  */
 import { describe, expect, test } from "vitest";
-import { encode174_91, getTones } from "../ft8/encode.js";
-import { pack77 } from "../util/pack_jt77.js";
+import { encode174_91, getTones } from "../src/ft8/encode.js";
+import { pack77 } from "../src/util/pack_jt77.js";
 import { FT8_VECTORS } from "./test_vectors.js";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
