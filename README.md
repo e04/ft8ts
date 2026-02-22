@@ -75,6 +75,10 @@ npm run build
 
 GPL-3.0
 
+## Related Projects
+
+- **[ft8js](https://github.com/e04/ft8js)** - My previous experimental project using WebAssembly (WASM) with [ft8_lib](https://github.com/kgoba/ft8_lib).
+
 ## References
 
 - [WSJT-X](https://wsjt.sourceforge.io/wsjtx.html) — Original Fortran implementation (v2.7.0), licensed under [GPL v3](https://www.gnu.org/licenses/gpl-3.0.html)
