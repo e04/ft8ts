@@ -2,12 +2,12 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
-import { decode } from "../ft8/decode.js";
-import { encode174_91, getTones } from "../ft8/encode.js";
-import { pack77 } from "../util/pack_jt77.js";
-import { unpack77 } from "../util/unpack_jt77.js";
-import { parseWavBuffer } from "../util/wav.js";
-import { generateFT8Waveform } from "../util/waveform.js";
+import { decode } from "../src/ft8/decode.js";
+import { encode174_91, getTones } from "../src/ft8/encode.js";
+import { pack77 } from "../src/util/pack_jt77.js";
+import { unpack77 } from "../src/util/unpack_jt77.js";
+import { parseWavBuffer } from "../src/util/wav.js";
+import { generateFT8Waveform } from "../src/util/waveform.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAMPLE_RATE = 12_000;
@@ -73,8 +73,8 @@ describe("FT8 Round Trip", () => {
 	}, 30_000);
 });
 
-/*
-  Downloaded from: https://sourceforge.net/projects/jtdx/files/samples/16bit_audio/FT8/190227_155815.wav/
+/**
+  Downloaded from: https://sourceforge.net/projects/jtdx/files/samples/16bit_audio/FT8/190227_155815.wav/download
 */
 describe("WAV decode: 190227_155815.wav", () => {
 	test("decodes at least 27 messages matching expected results", () => {
@@ -87,6 +87,9 @@ describe("WAV decode: 190227_155815.wav", () => {
 	}, 15_000);
 });
 
+/**
+  Downloaded from: https://sourceforge.net/projects/wsjt/files/samples/FT8/210703_133430.wav/download
+*/
 describe("WAV decode: 210703_133430.wav", () => {
 	test("decodes at least 13 messages matching expected results", () => {
 		const wavPath = join(__dirname, "210703_133430.wav");

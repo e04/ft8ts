@@ -2,9 +2,9 @@ import { readFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { decode } from "../ft8/decode.js";
-import { encode } from "../ft8/encode.js";
-import { parseWavBuffer, writeMono16WavFile } from "../util/wav.js";
+import { decode } from "../src/ft8/decode.js";
+import { encode } from "../src/ft8/encode.js";
+import { parseWavBuffer, writeMono16WavFile } from "../src/util/wav.js";
 
 const SAMPLE_RATE = 12_000;
 const BASE_FREQ = 1_000;

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { encode, encodeMessage } from "../ft8/encode.js";
-import { generateFT8Waveform } from "../util/waveform.js";
+import { encode, encodeMessage } from "../src/ft8/encode.js";
+import { generateFT8Waveform } from "../src/util/waveform.js";
 
 describe("FT8 waveform generator", () => {
 	test("generates a Float32Array waveform with FT8 default length", () => {
