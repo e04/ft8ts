@@ -61,6 +61,15 @@ export function decode(
 		dd = resample(samples, sampleRate, SAMPLE_RATE, NMAX);
 	}
 
+	// Compute huge FFT for downsampling caching
+	const NFFT1_LONG = 192000;
+	const cxRe = new Float64Array(NFFT1_LONG);
+	const cxIm = new Float64Array(NFFT1_LONG);
+	for (let i = 0; i < NMAX; i++) {
+		cxRe[i] = dd[i] ?? 0;
+	}
+	fftComplex(cxRe, cxIm, false);
+
 	// Compute spectrogram and find sync candidates
 	const { candidates, sbase } = sync8(dd, nfa, nfb, syncmin, maxCandidates);
 
@@ -68,7 +77,7 @@ export function decode(
 	const seenMessages = new Set<string>();
 
 	for (const cand of candidates) {
-		const result = ft8b(dd, cand.freq, cand.dt, sbase, depth);
+		const result = ft8b(dd, cxRe, cxIm, cand.freq, cand.dt, sbase, depth);
 		if (!result) continue;
 
 		if (seenMessages.has(result.msg)) continue;
@@ -304,6 +313,8 @@ interface Ft8bResult {
 
 function ft8b(
 	dd0: Float64Array,
+	cxRe: Float64Array,
+	cxIm: Float64Array,
 	f1: number,
 	xdt: number,
 	_sbase: Float64Array,
@@ -319,7 +330,7 @@ function ft8b(
 	// Downsample: mix to baseband and filter
 	const cd0Re = new Float64Array(NFFT2);
 	const cd0Im = new Float64Array(NFFT2);
-	ft8Downsample(dd0, f1, cd0Re, cd0Im, NFFT1_LONG, NFFT2);
+	ft8Downsample(cxRe, cxIm, f1, cd0Re, cd0Im);
 
 	// Find best time offset
 	const i0 = Math.round((xdt + 0.5) * fs2);
@@ -357,7 +368,7 @@ function ft8b(
 
 	// Apply frequency correction and re-downsample
 	f1 += delfbest;
-	ft8Downsample(dd0, f1, cd0Re, cd0Im, NFFT1_LONG, NFFT2);
+	ft8Downsample(cxRe, cxIm, f1, cd0Re, cd0Im);
 
 	// Refine time offset
 	const ss = new Float64Array(9);
@@ -568,54 +579,86 @@ function getTones(cw: number[]): number[] {
 }
 
 /**
- * Mix f0 to baseband and decimate by NDOWN (60x).
- * Time-domain approach: mix down, low-pass filter via moving average, decimate.
- * Output: complex baseband signal at 200 Hz sample rate (32 samples/symbol).
+ * Mix f0 to baseband and decimate by NDOWN (60x) by extracting frequency bins.
+ * Identical to Fortran ft8_downsample.
  */
 function ft8Downsample(
-	dd: Float64Array,
+	cxRe: Float64Array,
+	cxIm: Float64Array,
 	f0: number,
-	outRe: Float64Array,
-	outIm: Float64Array,
-	_nfft1Long: number,
-	nfft2: number,
+	c1Re: Float64Array,
+	c1Im: Float64Array,
 ): void {
-	const twopi = 2 * Math.PI;
-	const len = Math.min(dd.length, NMAX);
-	const dphi = (twopi * f0) / SAMPLE_RATE;
+	const NFFT1 = 192000;
+	const NFFT2 = 3200;
 
-	// Mix to baseband
-	const mixRe = new Float64Array(len);
-	const mixIm = new Float64Array(len);
-	let phi = 0;
-	for (let i = 0; i < len; i++) {
-		mixRe[i] = dd[i]! * Math.cos(phi);
-		mixIm[i] = -dd[i]! * Math.sin(phi);
-		phi += dphi;
-		if (phi > twopi) phi -= twopi;
+	const df = 12000.0 / NFFT1;
+	// NSPS is imported, should be 1920
+	const baud = 12000.0 / NSPS; // 6.25
+	const i0 = Math.round(f0 / df);
+	const ft = f0 + 8.5 * baud;
+	const it = Math.min(Math.round(ft / df), NFFT1 / 2);
+	const fb = f0 - 1.5 * baud;
+	const ib = Math.max(1, Math.round(fb / df));
+
+	c1Re.fill(0);
+	c1Im.fill(0);
+	let k = 0;
+	for (let i = ib; i <= it; i++) {
+		if (k >= NFFT2) break;
+		c1Re[k] = cxRe[i] ?? 0;
+		c1Im[k] = cxIm[i] ?? 0;
+		k++;
 	}
 
-	// Low-pass filter: simple moving-average with window = NDOWN
-	// then decimate by NDOWN to get 200 Hz sample rate
-	const outLen = Math.min(nfft2, Math.floor(len / NDOWN));
-	outRe.fill(0);
-	outIm.fill(0);
+	// Taper
+	const pi = Math.PI;
+	const taper = new Float64Array(101);
+	for (let i = 0; i <= 100; i++) {
+		taper[i] = 0.5 * (1.0 + Math.cos((i * pi) / 100));
+	}
 
-	// Running sum filter
-	const halfWin = NDOWN >> 1;
-	for (let k = 0; k < outLen; k++) {
-		const center = k * NDOWN + halfWin;
-		let sumRe = 0,
-			sumIm = 0;
-		const start = Math.max(0, center - halfWin);
-		const end = Math.min(len, center + halfWin);
-		for (let j = start; j < end; j++) {
-			sumRe += mixRe[j]!;
-			sumIm += mixIm[j]!;
+	for (let i = 0; i <= 100; i++) {
+		if (i >= NFFT2) break;
+		const tap = taper[100 - i]!;
+		c1Re[i] = c1Re[i]! * tap;
+		c1Im[i] = c1Im[i]! * tap;
+	}
+
+	const endTap = k - 1;
+	for (let i = 0; i <= 100; i++) {
+		const idx = endTap - 100 + i;
+		if (idx >= 0 && idx < NFFT2) {
+			const tap = taper[i]!;
+			c1Re[idx] = c1Re[idx]! * tap;
+			c1Im[idx] = c1Im[idx]! * tap;
 		}
-		const n = end - start;
-		outRe[k] = sumRe / n;
-		outIm[k] = sumIm / n;
+	}
+
+	// CSHIFT
+	const shift = i0 - ib;
+	const tempRe = new Float64Array(NFFT2);
+	const tempIm = new Float64Array(NFFT2);
+	for (let i = 0; i < NFFT2; i++) {
+		let srcIdx = (i + shift) % NFFT2;
+		if (srcIdx < 0) srcIdx += NFFT2;
+		tempRe[i] = c1Re[srcIdx]!;
+		tempIm[i] = c1Im[srcIdx]!;
+	}
+	for (let i = 0; i < NFFT2; i++) {
+		c1Re[i] = tempRe[i]!;
+		c1Im[i] = tempIm[i]!;
+	}
+
+	// iFFT
+	fftComplex(c1Re, c1Im, true);
+
+	// Scale
+	// Fortran uses 1.0/sqrt(NFFT1 * NFFT2), but our fftComplex(true) scales by 1/NFFT2
+	const scale = Math.sqrt(NFFT2 / NFFT1);
+	for (let i = 0; i < NFFT2; i++) {
+		c1Re[i] = c1Re[i]! * scale;
+		c1Im[i] = c1Im[i]! * scale;
 	}
 }
 

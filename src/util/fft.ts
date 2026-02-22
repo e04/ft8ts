@@ -7,6 +7,11 @@ export function fftComplex(re: Float64Array, im: Float64Array, inverse: boolean)
 	const n = re.length;
 	if (n <= 1) return;
 
+	if ((n & (n - 1)) !== 0) {
+		bluestein(re, im, inverse);
+		return;
+	}
+
 	// Bit-reversal permutation
 	let j = 0;
 	for (let i = 0; i < n; i++) {
@@ -58,6 +63,57 @@ export function fftComplex(re: Float64Array, im: Float64Array, inverse: boolean)
 			re[i]! /= n;
 			im[i]! /= n;
 		}
+	}
+}
+
+function bluestein(re: Float64Array, im: Float64Array, inverse: boolean): void {
+	const n = re.length;
+	const m = nextPow2(n * 2 - 1);
+	const s = inverse ? 1 : -1;
+
+	const aRe = new Float64Array(m);
+	const aIm = new Float64Array(m);
+	const bRe = new Float64Array(m);
+	const bIm = new Float64Array(m);
+
+	for (let i = 0; i < n; i++) {
+		const angle = (s * Math.PI * ((i * i) % (2 * n))) / n;
+		const cosA = Math.cos(angle);
+		const sinA = Math.sin(angle);
+
+		aRe[i] = re[i]! * cosA - im[i]! * sinA;
+		aIm[i] = re[i]! * sinA + im[i]! * cosA;
+
+		bRe[i] = cosA;
+		bIm[i] = -sinA;
+	}
+	for (let i = 1; i < n; i++) {
+		bRe[m - i] = bRe[i]!;
+		bIm[m - i] = bIm[i]!;
+	}
+
+	fftComplex(aRe, aIm, false);
+	fftComplex(bRe, bIm, false);
+
+	for (let i = 0; i < m; i++) {
+		const r = aRe[i]! * bRe[i]! - aIm[i]! * bIm[i]!;
+		const iIm = aRe[i]! * bIm[i]! + aIm[i]! * bRe[i]!;
+		aRe[i] = r;
+		aIm[i] = iIm;
+	}
+
+	fftComplex(aRe, aIm, true);
+
+	const scale = inverse ? 1 / n : 1;
+	for (let i = 0; i < n; i++) {
+		const angle = (s * Math.PI * ((i * i) % (2 * n))) / n;
+		const cosA = Math.cos(angle);
+		const sinA = Math.sin(angle);
+
+		const r = aRe[i]! * cosA - aIm[i]! * sinA;
+		const iIm = aRe[i]! * sinA + aIm[i]! * cosA;
+		re[i] = r * scale;
+		im[i] = iIm * scale;
 	}
 }
 
