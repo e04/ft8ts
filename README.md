@@ -1,5 +1,7 @@
 # ft8ts
 
+[![Tests](https://github.com/e04/ft8ts/actions/workflows/test.yml/badge.svg)](https://github.com/e04/ft8ts/actions/workflows/test.yml)
+
 FT8 encoder and decoder in TypeScript. A port of the Fortran implementation from [WSJT-X](https://wsjt.sourceforge.io/wsjtx.html) v2.7.0.
 
 ## Overview
