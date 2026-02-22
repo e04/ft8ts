@@ -17,7 +17,7 @@ https://e04.github.io/ft8ts/example/browser/index.html
 #### Encode
 
 ```bash
-npx tsx example/generate-ft8-wav.ts "<message>" [--out output.wav] [--df 1000]
+npx tsx example/generate-ft8-wav.ts "CQ JK1IFA PM95" [--out output.wav] [--df 1000]
 ```
 
 #### Decode
