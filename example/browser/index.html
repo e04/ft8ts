@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ft8ts Encode/Decode Demo</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 480px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+    }
+    h1 { font-size: 1.25rem; margin-bottom: 1.5rem; }
+    section {
+      margin-bottom: 2rem;
+      padding: 1rem;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+    }
+    section h2 { font-size: 1rem; margin: 0 0 0.75rem 0; }
+    label { display: block; font-size: 0.875rem; color: #555; margin-bottom: 0.25rem; }
+    input[type="text"] {
+      width: 100%;
+      padding: 0.5rem;
+      font-size: 1rem;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      margin-bottom: 0.75rem;
+    }
+    input[type="text"]::placeholder { color: #999; }
+    button {
+      padding: 0.5rem 1rem;
+      font-size: 1rem;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      background: #0066cc;
+      color: white;
+    }
+    button:hover { background: #0052a3; }
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    .output {
+      margin-top: 0.75rem;
+      overflow-x: auto;
+    }
+    .decode-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+      font-family: monospace;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .decode-table th,
+    .decode-table td {
+      padding: 0.35rem 0.5rem;
+      text-align: left;
+      border-bottom: 1px solid #ddd;
+    }
+    .decode-table th {
+      background: #e8e8e8;
+      font-weight: 600;
+    }
+    .decode-table tr:hover td { background: #eee; }
+    .status { font-size: 0.8rem; color: #666; margin-top: 0.5rem; }
+    .error { color: #c00; }
+  </style>
+</head>
+<body>
+  <h1>ft8ts Encode / Decode Demo</h1>
+
+  <section>
+    <h2>Encode</h2>
+    <label for="encode-input">Message</label>
+    <input id="encode-input" type="text" placeholder="CQ JK1IFA PM95" value="CQ JK1IFA PM95">
+    <button id="encode-btn" type="button">Play</button>
+    <div id="encode-status" class="status"></div>
+  </section>
+
+  <section>
+    <h2>Decode</h2>
+    <p class="status">Press the button to record for 15 seconds and decode.</p>
+    <button id="decode-btn" type="button">Record</button>
+    <div id="decode-output" class="output"></div>
+    <div id="decode-status" class="status"></div>
+  </section>
+
+  <script type="module">
+    import { encodeFT8, decodeFT8 } from '../../dist/ft8ts.mjs';
+
+    const SAMPLE_RATE = 12000;
+    const RECORD_DURATION = 15;
+
+    function escapeHtml(s) {
+      const div = document.createElement('div');
+      div.textContent = s;
+      return div.innerHTML;
+    }
+
+    // --- Encode ---
+    const encodeInput = document.getElementById('encode-input');
+    const encodeBtn = document.getElementById('encode-btn');
+    const encodeStatus = document.getElementById('encode-status');
+
+    encodeBtn.addEventListener('click', async () => {
+      const msg = encodeInput.value.trim();
+      if (!msg) {
+        encodeStatus.textContent = 'Please enter a message';
+        encodeStatus.className = 'status error';
+        return;
+      }
+      encodeStatus.textContent = '';
+      encodeStatus.className = 'status';
+      encodeBtn.disabled = true;
+
+      try {
+        const samples = encodeFT8(msg, { sampleRate: SAMPLE_RATE, baseFrequency: 1000 });
+        const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+        const buffer = ctx.createBuffer(1, samples.length, SAMPLE_RATE);
+        buffer.getChannelData(0).set(samples);
+
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(ctx.destination);
+        source.start(0);
+
+        encodeStatus.textContent = 'Playing...';
+        source.onended = () => {
+          encodeStatus.textContent = 'Playback complete';
+          encodeBtn.disabled = false;
+        };
+      } catch (e) {
+        encodeStatus.textContent = 'Error: ' + (e.message || e);
+        encodeStatus.className = 'status error';
+        encodeBtn.disabled = false;
+      }
+    });
+
+    // --- Decode ---
+    const decodeBtn = document.getElementById('decode-btn');
+    const decodeOutput = document.getElementById('decode-output');
+    const decodeStatus = document.getElementById('decode-status');
+
+    decodeBtn.addEventListener('click', async () => {
+      decodeOutput.innerHTML = '';
+      decodeStatus.textContent = 'Requesting microphone access...';
+      decodeStatus.className = 'status';
+      decodeBtn.disabled = true;
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const sampleRate = ctx.sampleRate;
+
+        const source = ctx.createMediaStreamSource(stream);
+        const processor = ctx.createScriptProcessor(4096, 1, 1);
+        const chunks = [];
+        let totalSamples = 0;
+        const targetSamples = sampleRate * RECORD_DURATION;
+
+        processor.onaudioprocess = (e) => {
+          const input = e.inputBuffer.getChannelData(0);
+          chunks.push(new Float32Array(input));
+          totalSamples += input.length;
+          const elapsed = totalSamples / sampleRate;
+          decodeStatus.textContent = `Recording... ${elapsed.toFixed(1)} / ${RECORD_DURATION} s`;
+          if (totalSamples >= targetSamples) {
+            source.disconnect();
+            processor.disconnect();
+            stream.getTracks().forEach((t) => t.stop());
+          }
+        };
+
+        const silentGain = ctx.createGain();
+        silentGain.gain.value = 0;
+        source.connect(processor);
+        processor.connect(silentGain);
+        silentGain.connect(ctx.destination);
+
+        const waitForRecord = () =>
+          new Promise((resolve) => {
+            const check = () => {
+              if (totalSamples >= targetSamples) {
+                resolve();
+              } else {
+                setTimeout(check, 100);
+              }
+            };
+            check();
+          });
+
+        await waitForRecord();
+
+        const merged = new Float32Array(totalSamples);
+        let offset = 0;
+        for (const chunk of chunks) {
+          merged.set(chunk, offset);
+          offset += chunk.length;
+        }
+
+        decodeStatus.textContent = 'Decoding...';
+        const results = decodeFT8(merged, sampleRate);
+
+        if (results.length === 0) {
+          decodeOutput.textContent = '(No decode results)';
+          decodeStatus.textContent = 'No FT8 signals detected';
+        } else {
+          decodeOutput.innerHTML = `
+            <table class="decode-table">
+              <thead>
+                <tr>
+                  <th>freq (Hz)</th>
+                  <th>dt (s)</th>
+                  <th>snr (dB)</th>
+                  <th>sync</th>
+                  <th>msg</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${results
+                  .map(
+                    (r) =>
+                      `<tr>
+                        <td>${r.freq.toFixed(0)}</td>
+                        <td>${r.dt.toFixed(2)}</td>
+                        <td>${r.snr.toFixed(1)}</td>
+                        <td>${r.sync.toFixed(2)}</td>
+                        <td>${escapeHtml(r.msg)}</td>
+                      </tr>`,
+                  )
+                  .join('')}
+              </tbody>
+            </table>
+          `;
+          decodeStatus.textContent = `${results.length} message(s) detected`;
+        }
+      } catch (e) {
+        decodeOutput.innerHTML = '';
+        decodeStatus.textContent = 'Error: ' + (e.message || e);
+        decodeStatus.className = 'status error';
+      }
+      decodeBtn.disabled = false;
+    });
+  </script>
+</body>
+</html>
