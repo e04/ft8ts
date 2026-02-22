@@ -12,6 +12,11 @@ import { generateFT8Waveform } from "../src/util/waveform.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAMPLE_RATE = 12_000;
 
+/** Hashed callsigns (<CALL>) become <...> when unpacking. Normalize expected value. */
+function replaceHashedCallsign(msg: string): string {
+	return msg.replace(/<[^>]+>/g, "<...>").trim().toUpperCase();
+}
+
 const ROUND_TRIP_MESSAGES = [
 	"CQ JK1IFA PM95",
 	"K1ABC W9XYZ EN37",
@@ -23,6 +28,10 @@ const ROUND_TRIP_MESSAGES = [
 	"TNX BOB 73 GL",
 	"G4ABC/P PA9XYZ JO22",
 	"PA9XYZ G4ABC/P RR73",
+	"PJ4/K1ABC <W9XYZ>",
+	"PJ4/K1ABC <W9XYZ> 73",
+	"YW18FIFA <W9XYZ> RRR",
+	"<KA1ABC> YW18FIFA RR73",
 ];
 
 describe("Unpack77", () => {
@@ -30,7 +39,8 @@ describe("Unpack77", () => {
 		const bits77 = pack77(msg);
 		const { msg: unpacked, success } = unpack77(bits77);
 		expect(success).toBe(true);
-		expect(unpacked.trim().toUpperCase()).toBe(msg.trim().toUpperCase());
+		// Hashed callsigns (<CALL>) become <...> when unpacking
+		expect(unpacked.trim().toUpperCase()).toBe(replaceHashedCallsign(msg));
 	});
 });
 
@@ -62,7 +72,8 @@ describe("FT8 Round Trip", () => {
 			depth: 2,
 		});
 
-		const found = decoded.find((d) => d.msg.trim().toUpperCase() === msg.trim().toUpperCase());
+		const expected = replaceHashedCallsign(msg);
+		const found = decoded.find((d) => d.msg.trim().toUpperCase() === expected);
 		expect(found).toBeDefined();
 		if (found) {
 			expect(Math.abs(found.freq - baseFreq)).toBeLessThan(10);
