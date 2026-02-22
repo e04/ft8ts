@@ -568,6 +568,10 @@ function fftComplex(re, im, inverse) {
     const n = re.length;
     if (n <= 1)
         return;
+    if ((n & (n - 1)) !== 0) {
+        bluestein(re, im, inverse);
+        return;
+    }
     // Bit-reversal permutation
     let j = 0;
     for (let i = 0; i < n; i++) {
@@ -586,7 +590,7 @@ function fftComplex(re, im, inverse) {
         }
         j += m;
     }
-    const sign = -1;
+    const sign = inverse ? 1 : -1;
     for (let size = 2; size <= n; size <<= 1) {
         const halfsize = size >> 1;
         const step = (sign * Math.PI) / halfsize;
@@ -609,6 +613,53 @@ function fftComplex(re, im, inverse) {
                 curRe = newCurRe;
             }
         }
+    }
+    if (inverse) {
+        for (let i = 0; i < n; i++) {
+            re[i] /= n;
+            im[i] /= n;
+        }
+    }
+}
+function bluestein(re, im, inverse) {
+    const n = re.length;
+    const m = nextPow2(n * 2 - 1);
+    const s = inverse ? 1 : -1;
+    const aRe = new Float64Array(m);
+    const aIm = new Float64Array(m);
+    const bRe = new Float64Array(m);
+    const bIm = new Float64Array(m);
+    for (let i = 0; i < n; i++) {
+        const angle = (s * Math.PI * ((i * i) % (2 * n))) / n;
+        const cosA = Math.cos(angle);
+        const sinA = Math.sin(angle);
+        aRe[i] = re[i] * cosA - im[i] * sinA;
+        aIm[i] = re[i] * sinA + im[i] * cosA;
+        bRe[i] = cosA;
+        bIm[i] = -sinA;
+    }
+    for (let i = 1; i < n; i++) {
+        bRe[m - i] = bRe[i];
+        bIm[m - i] = bIm[i];
+    }
+    fftComplex(aRe, aIm, false);
+    fftComplex(bRe, bIm, false);
+    for (let i = 0; i < m; i++) {
+        const r = aRe[i] * bRe[i] - aIm[i] * bIm[i];
+        const iIm = aRe[i] * bIm[i] + aIm[i] * bRe[i];
+        aRe[i] = r;
+        aIm[i] = iIm;
+    }
+    fftComplex(aRe, aIm, true);
+    const scale = inverse ? 1 / n : 1;
+    for (let i = 0; i < n; i++) {
+        const angle = (s * Math.PI * ((i * i) % (2 * n))) / n;
+        const cosA = Math.cos(angle);
+        const sinA = Math.sin(angle);
+        const r = aRe[i] * cosA - aIm[i] * sinA;
+        const iIm = aRe[i] * sinA + aIm[i] * cosA;
+        re[i] = r * scale;
+        im[i] = iIm * scale;
     }
 }
 /** Next power of 2 >= n */
@@ -880,12 +931,20 @@ function decode(samples, sampleRate = SAMPLE_RATE, options = {}) {
     else {
         dd = resample(samples, sampleRate, SAMPLE_RATE, NMAX);
     }
+    // Compute huge FFT for downsampling caching
+    const NFFT1_LONG = 192000;
+    const cxRe = new Float64Array(NFFT1_LONG);
+    const cxIm = new Float64Array(NFFT1_LONG);
+    for (let i = 0; i < NMAX; i++) {
+        cxRe[i] = dd[i] ?? 0;
+    }
+    fftComplex(cxRe, cxIm, false);
     // Compute spectrogram and find sync candidates
     const { candidates, sbase } = sync8(dd, nfa, nfb, syncmin, maxCandidates);
     const decoded = [];
     const seenMessages = new Set();
     for (const cand of candidates) {
-        const result = ft8b(dd, cand.freq, cand.dt, sbase, depth);
+        const result = ft8b(dd, cxRe, cxIm, cand.freq, cand.dt, sbase, depth);
         if (!result)
             continue;
         if (seenMessages.has(result.msg))
@@ -921,7 +980,7 @@ function sync8(dd, nfa, nfb, syncmin, maxcand) {
         for (let i = 0; i < NSPS && ia + i < dd.length; i++) {
             xRe[i] = fac * dd[ia + i];
         }
-        fftComplex(xRe, xIm);
+        fftComplex(xRe, xIm, false);
         for (let i = 0; i < halfSize; i++) {
             const power = xRe[i] * xRe[i] + xIm[i] * xIm[i];
             s[i * NHSYM + j] = power;
@@ -1069,17 +1128,16 @@ function computeBaseline(savg, nfa, nfb, df, nh1) {
     }
     return sbase;
 }
-function ft8b(dd0, f1, xdt, _sbase, depth) {
+function ft8b(dd0, cxRe, cxIm, f1, xdt, _sbase, depth) {
     const NFFT2 = 3200;
     const NP2 = 2812;
-    const NFFT1_LONG = 192000;
     const fs2 = SAMPLE_RATE / NDOWN;
     const dt2 = 1.0 / fs2;
     const twopi = 2 * Math.PI;
     // Downsample: mix to baseband and filter
     const cd0Re = new Float64Array(NFFT2);
     const cd0Im = new Float64Array(NFFT2);
-    ft8Downsample(dd0, f1, cd0Re, cd0Im, NFFT1_LONG, NFFT2);
+    ft8Downsample(cxRe, cxIm, f1, cd0Re, cd0Im);
     // Find best time offset
     const i0 = Math.round((xdt + 0.5) * fs2);
     let smax = 0;
@@ -1113,7 +1171,7 @@ function ft8b(dd0, f1, xdt, _sbase, depth) {
     }
     // Apply frequency correction and re-downsample
     f1 += delfbest;
-    ft8Downsample(dd0, f1, cd0Re, cd0Im, NFFT1_LONG, NFFT2);
+    ft8Downsample(cxRe, cxIm, f1, cd0Re, cd0Im);
     // Refine time offset
     const ss = new Float64Array(9);
     for (let idt = -4; idt <= 4; idt++) {
@@ -1145,7 +1203,7 @@ function ft8b(dd0, f1, xdt, _sbase, depth) {
                 symbIm[j] = cd0Im[i1 + j];
             }
         }
-        fftComplex(symbRe, symbIm);
+        fftComplex(symbRe, symbIm, false);
         for (let tone = 0; tone < 8; tone++) {
             const re = symbRe[tone] / 1000;
             const im = symbIm[tone] / 1000;
@@ -1319,44 +1377,75 @@ function getTones$1(cw) {
     return tones;
 }
 /**
- * Mix f0 to baseband and decimate by NDOWN (60x).
- * Time-domain approach: mix down, low-pass filter via moving average, decimate.
- * Output: complex baseband signal at 200 Hz sample rate (32 samples/symbol).
+ * Mix f0 to baseband and decimate by NDOWN (60x) by extracting frequency bins.
+ * Identical to Fortran ft8_downsample.
  */
-function ft8Downsample(dd, f0, outRe, outIm, _nfft1Long, nfft2) {
-    const twopi = 2 * Math.PI;
-    const len = Math.min(dd.length, NMAX);
-    const dphi = (twopi * f0) / SAMPLE_RATE;
-    // Mix to baseband
-    const mixRe = new Float64Array(len);
-    const mixIm = new Float64Array(len);
-    let phi = 0;
-    for (let i = 0; i < len; i++) {
-        mixRe[i] = dd[i] * Math.cos(phi);
-        mixIm[i] = -dd[i] * Math.sin(phi);
-        phi += dphi;
-        if (phi > twopi)
-            phi -= twopi;
+function ft8Downsample(cxRe, cxIm, f0, c1Re, c1Im) {
+    const NFFT1 = 192000;
+    const NFFT2 = 3200;
+    const df = 12000.0 / NFFT1;
+    // NSPS is imported, should be 1920
+    const baud = 12000.0 / NSPS; // 6.25
+    const i0 = Math.round(f0 / df);
+    const ft = f0 + 8.5 * baud;
+    const it = Math.min(Math.round(ft / df), NFFT1 / 2);
+    const fb = f0 - 1.5 * baud;
+    const ib = Math.max(1, Math.round(fb / df));
+    c1Re.fill(0);
+    c1Im.fill(0);
+    let k = 0;
+    for (let i = ib; i <= it; i++) {
+        if (k >= NFFT2)
+            break;
+        c1Re[k] = cxRe[i] ?? 0;
+        c1Im[k] = cxIm[i] ?? 0;
+        k++;
     }
-    // Low-pass filter: simple moving-average with window = NDOWN
-    // then decimate by NDOWN to get 200 Hz sample rate
-    const outLen = Math.min(nfft2, Math.floor(len / NDOWN));
-    outRe.fill(0);
-    outIm.fill(0);
-    // Running sum filter
-    const halfWin = NDOWN >> 1;
-    for (let k = 0; k < outLen; k++) {
-        const center = k * NDOWN + halfWin;
-        let sumRe = 0, sumIm = 0;
-        const start = Math.max(0, center - halfWin);
-        const end = Math.min(len, center + halfWin);
-        for (let j = start; j < end; j++) {
-            sumRe += mixRe[j];
-            sumIm += mixIm[j];
+    // Taper
+    const pi = Math.PI;
+    const taper = new Float64Array(101);
+    for (let i = 0; i <= 100; i++) {
+        taper[i] = 0.5 * (1.0 + Math.cos((i * pi) / 100));
+    }
+    for (let i = 0; i <= 100; i++) {
+        if (i >= NFFT2)
+            break;
+        const tap = taper[100 - i];
+        c1Re[i] = c1Re[i] * tap;
+        c1Im[i] = c1Im[i] * tap;
+    }
+    const endTap = k - 1;
+    for (let i = 0; i <= 100; i++) {
+        const idx = endTap - 100 + i;
+        if (idx >= 0 && idx < NFFT2) {
+            const tap = taper[i];
+            c1Re[idx] = c1Re[idx] * tap;
+            c1Im[idx] = c1Im[idx] * tap;
         }
-        const n = end - start;
-        outRe[k] = sumRe / n;
-        outIm[k] = sumIm / n;
+    }
+    // CSHIFT
+    const shift = i0 - ib;
+    const tempRe = new Float64Array(NFFT2);
+    const tempIm = new Float64Array(NFFT2);
+    for (let i = 0; i < NFFT2; i++) {
+        let srcIdx = (i + shift) % NFFT2;
+        if (srcIdx < 0)
+            srcIdx += NFFT2;
+        tempRe[i] = c1Re[srcIdx];
+        tempIm[i] = c1Im[srcIdx];
+    }
+    for (let i = 0; i < NFFT2; i++) {
+        c1Re[i] = tempRe[i];
+        c1Im[i] = tempIm[i];
+    }
+    // iFFT
+    fftComplex(c1Re, c1Im, true);
+    // Scale
+    // Fortran uses 1.0/sqrt(NFFT1 * NFFT2), but our fftComplex(true) scales by 1/NFFT2
+    const scale = Math.sqrt(NFFT2 / NFFT1);
+    for (let i = 0; i < NFFT2; i++) {
+        c1Re[i] = c1Re[i] * scale;
+        c1Im[i] = c1Im[i] * scale;
     }
 }
 function sync8d(cd0Re, cd0Im, i0, twkRe, twkIm, useTwk) {
