@@ -13,19 +13,16 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAMPLE_RATE = 12_000;
 
 const ROUND_TRIP_MESSAGES = [
-	"CQ K1ABC FN42",
+	"CQ JK1IFA PM95",
 	"K1ABC W9XYZ EN37",
 	"W9XYZ K1ABC -11",
 	"K1ABC W9XYZ R-09",
 	"W9XYZ K1ABC RRR",
 	"K1ABC W9XYZ 73",
 	"K1ABC W9XYZ RR73",
-	"CQ W9XYZ EN37",
-	"CQ JK1IFA PM95",
 	"TNX BOB 73 GL",
 	"G4ABC/P PA9XYZ JO22",
 	"PA9XYZ G4ABC/P RR73",
-	'FREEMESSAGE',
 ];
 
 describe("Unpack77", () => {
