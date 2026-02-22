@@ -6,6 +6,26 @@ FT8 encoder and decoder in TypeScript. A port of the Fortran implementation from
 
 FT8 is a digital amateur radio mode designed for weak-signal communication. This library provides pure TypeScript implementations of both encoding and decoding, suitable for use in Node.js or the browser.
 
+## Demo
+
+### Browser
+
+https://e04.github.io/ft8ts/example/browser/index.html
+
+### CLI
+
+#### Encode
+
+```bash
+npx tsx example/generate-ft8-wav.ts "<message>" [--out output.wav] [--df 1000]
+```
+
+#### Decode
+
+```bash
+npx tsx example/decode-ft8-wav.ts ./src/__test__/190227_155815.wav [--low 200] [--high 3000] [--depth 2]
+```
+
 ## Installation
 
 `npm i @e04/ft8ts`
@@ -44,24 +64,6 @@ for (const d of decoded) {
 | `syncMin` | 1.2 | Minimum sync threshold |
 | `depth` | 2 | Decoding depth: 1=fast BP only, 2=BP+OSD, 3=deep |
 | `maxCandidates` | 300 | Maximum candidates to process |
-
-### Browser Demo
-
-https://e04.github.io/ft8ts/example/browser/index.html
-
-### CLI
-
-#### Encode
-
-```bash
-npx tsx example/generate-ft8-wav.ts "<message>" [--out output.wav] [--df 1000]
-```
-
-#### Decode
-
-```bash
-npx tsx example/decode-ft8-wav.ts ./src/__test__/190227_155815.wav [--low 200] [--high 3000] [--depth 2]
-```
 
 ## Build
 
