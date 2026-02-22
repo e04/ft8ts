@@ -11,8 +11,6 @@ import { encode174_91, getTones } from "../src/ft8/encode.js";
 import { pack77 } from "../src/util/pack_jt77.js";
 import { FT8_VECTORS } from "./test_vectors.js";
 
-// ─── helpers ────────────────────────────────────────────────────────────────
-
 function bitsToString(bits: number[]): string {
 	return bits.join("");
 }
@@ -27,15 +25,11 @@ function formatTones(tones: number[]): string {
 	return `${sync} ${data1} ${sync2} ${data2} ${sync3}`;
 }
 
-// ─── test runner ────────────────────────────────────────────────────────────
-
 describe("FT8 Full Pipeline", () => {
 	test.each(FT8_VECTORS)('encodes message: "$msg"', (v) => {
-		// ── 1. pack77 → 77-bit source encoding ───────────────────────────────────
 		const bits77 = pack77(v.msg);
 		expect(bitsToString(bits77)).toBe(v.bits77);
 
-		// ── 2. encode174_91 → 91-bit (77 + 14-bit CRC) + 83 parity bits ─────────
 		const codeword = encode174_91(bits77);
 		const crc14 = codeword.slice(77, 91);
 		const parity83 = codeword.slice(91, 174);
@@ -43,7 +37,6 @@ describe("FT8 Full Pipeline", () => {
 		expect(bitsToString(crc14)).toBe(v.crc14);
 		expect(bitsToString(parity83)).toBe(v.parity83);
 
-		// ── 3. getTones → 79 channel symbols ─────────────────────────────────────
 		const tones = getTones(codeword);
 		const tonesStr = formatTones(tones);
 
