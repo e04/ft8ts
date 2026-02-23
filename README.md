@@ -6,7 +6,9 @@ FT8 encoder and decoder in TypeScript. A port of the Fortran implementation from
 
 ## Overview
 
-FT8 is a digital amateur radio mode designed for weak-signal communication. This library provides pure TypeScript implementations of both encoding and decoding, suitable for use in Node.js or the browser.
+FT8 is a digital amateur radio mode designed for weak-signal communication, developed by Joe Taylor (K1JT) and Steve Franke (K9AN).
+
+This library provides pure TypeScript implementations of both encoding and decoding, suitable for use in Node.js or the browser.
 
 ## Demo
 
