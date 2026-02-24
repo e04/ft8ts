@@ -9,6 +9,7 @@
  */
 
 import { A1, A2, A3, A4, C38, FTALPH, MAX22, MAXGRID4, NTOKENS } from "./constants.js";
+import type { HashCallBook } from "./hashcall.js";
 
 function bitsToUint(bits: number[], start: number, len: number): number {
 	let val = 0;
@@ -18,7 +19,7 @@ function bitsToUint(bits: number[], start: number, len: number): number {
 	return val;
 }
 
-function unpack28(n28: number): { call: string; success: boolean } {
+function unpack28(n28: number, book: HashCallBook | undefined): { call: string; success: boolean } {
 	if (n28 < 0 || n28 >= 268435456) return { call: "", success: false };
 
 	if (n28 === 0) return { call: "DE", success: true };
@@ -31,7 +32,6 @@ function unpack28(n28: number): { call: string; success: boolean } {
 	}
 
 	if (n28 >= 1003 && n28 < NTOKENS) {
-		// CQ with 4-letter directed call
 		let m = n28 - 1003;
 		let chars = "";
 		for (let i = 3; i >= 0; i--) {
@@ -45,7 +45,9 @@ function unpack28(n28: number): { call: string; success: boolean } {
 	}
 
 	if (n28 >= NTOKENS && n28 < NTOKENS + MAX22) {
-		// Hashed call – we don't have a hash table, so show <...>
+		const n22 = n28 - NTOKENS;
+		const resolved = book?.lookup22(n22);
+		if (resolved) return { call: `<${resolved}>`, success: true };
 		return { call: "<...>", success: true };
 	}
 
@@ -127,8 +129,11 @@ function unpackText77(bits71: number[]): string {
 
 /**
  * Unpack a 77-bit FT8 message into a human-readable string.
+ *
+ * When a {@link HashCallBook} is provided, hashed callsigns are resolved from
+ * the book, and newly decoded standard callsigns are saved into it.
  */
-export function unpack77(bits77: number[]): { msg: string; success: boolean } {
+export function unpack77(bits77: number[], book?: HashCallBook): { msg: string; success: boolean } {
 	const n3 = bitsToUint(bits77, 71, 3);
 	const i3 = bitsToUint(bits77, 74, 3);
 
@@ -148,8 +153,8 @@ export function unpack77(bits77: number[]): { msg: string; success: boolean } {
 		const ir = bits77[58]!;
 		const igrid4 = bitsToUint(bits77, 59, 15);
 
-		const { call: call1, success: ok1 } = unpack28(n28a);
-		const { call: call2Raw, success: ok2 } = unpack28(n28b);
+		const { call: call1, success: ok1 } = unpack28(n28a, book);
+		const { call: call2Raw, success: ok2 } = unpack28(n28b, book);
 		if (!ok1 || !ok2) return { msg: "", success: false };
 
 		let c1 = call1;
@@ -164,6 +169,8 @@ export function unpack77(bits77: number[]): { msg: string; success: boolean } {
 		if (c2.indexOf("<") < 0) {
 			if (ipb === 1 && i3 === 1 && c2.length >= 3) c2 += "/R";
 			if (ipb === 1 && i3 === 2 && c2.length >= 3) c2 += "/P";
+			// Save the "from" call (call_2) into the hash book
+			if (book && c2.length >= 3) book.save(c2);
 		}
 
 		if (igrid4 <= MAXGRID4) {
@@ -191,6 +198,7 @@ export function unpack77(bits77: number[]): { msg: string; success: boolean } {
 
 	if (i3 === 4) {
 		// Type 4: One nonstandard call
+		const n12 = bitsToUint(bits77, 0, 12);
 		let n58 = 0n;
 		for (let i = 0; i < 58; i++) {
 			n58 = n58 * 2n + BigInt(bits77[12 + i] ?? 0);
@@ -199,7 +207,6 @@ export function unpack77(bits77: number[]): { msg: string; success: boolean } {
 		const nrpt = bitsToUint(bits77, 71, 2);
 		const icq = bits77[73]!;
 
-		// Decode n58 to 11-char string using C38 alphabet
 		const c11chars: string[] = [];
 		let remain = n58;
 		for (let i = 10; i >= 0; i--) {
@@ -209,13 +216,15 @@ export function unpack77(bits77: number[]): { msg: string; success: boolean } {
 		}
 		const c11 = c11chars.join("").trim();
 
-		const call3 = "<...>"; // We don't have a hash table for n12
+		const resolved = book?.lookup12(n12);
+		const call3 = resolved ? `<${resolved}>` : "<...>";
 
 		let call1: string;
 		let call2: string;
 		if (iflip === 0) {
 			call1 = call3;
 			call2 = c11;
+			if (book) book.save(c11);
 		} else {
 			call1 = c11;
 			call2 = call3;

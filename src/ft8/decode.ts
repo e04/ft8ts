@@ -13,6 +13,7 @@ import {
 } from "../util/constants.js";
 import { decode174_91 } from "../util/decode174_91.js";
 import { fftComplex, nextPow2 } from "../util/fft.js";
+import type { HashCallBook } from "../util/hashcall.js";
 import { unpack77 } from "../util/unpack_jt77.js";
 
 export interface DecodedMessage {
@@ -34,6 +35,14 @@ export interface DecodeOptions {
 	depth?: number;
 	/** Maximum candidates to process */
 	maxCandidates?: number;
+	/**
+	 * Hash call book for resolving hashed callsigns.
+	 * When provided, decoded standard callsigns are saved into the book,
+	 * and hashed callsigns (e.g. `<...>`) are resolved from it.
+	 * Pass the same instance across multiple `decode` calls to accumulate
+	 * callsign knowledge over time.
+	 */
+	hashCallBook?: HashCallBook;
 }
 
 /**
@@ -50,6 +59,7 @@ export function decode(
 	const syncmin = options.syncMin ?? 1.2;
 	const depth = options.depth ?? 2;
 	const maxCandidates = options.maxCandidates ?? 300;
+	const book = options.hashCallBook;
 
 	// Resample to 12000 Hz if needed
 	let dd: Float64Array;
@@ -77,7 +87,7 @@ export function decode(
 	const seenMessages = new Set<string>();
 
 	for (const cand of candidates) {
-		const result = ft8b(dd, cxRe, cxIm, cand.freq, cand.dt, sbase, depth);
+		const result = ft8b(dd, cxRe, cxIm, cand.freq, cand.dt, sbase, depth, book);
 		if (!result) continue;
 
 		if (seenMessages.has(result.msg)) continue;
@@ -312,17 +322,18 @@ interface Ft8bResult {
 }
 
 function ft8b(
-	dd0: Float64Array,
+	_dd0: Float64Array,
 	cxRe: Float64Array,
 	cxIm: Float64Array,
 	f1: number,
 	xdt: number,
 	_sbase: Float64Array,
 	depth: number,
+	book: HashCallBook | undefined,
 ): Ft8bResult | null {
 	const NFFT2 = 3200;
 	const NP2 = 2812;
-	const NFFT1_LONG = 192000;
+	const _NFFT1_LONG = 192000;
 	const fs2 = SAMPLE_RATE / NDOWN;
 	const dt2 = 1.0 / fs2;
 	const twopi = 2 * Math.PI;
@@ -541,7 +552,7 @@ function ft8b(
 	if (i3v === 0 && n3v === 2) return null;
 
 	// Unpack
-	const { msg, success } = unpack77(message77);
+	const { msg, success } = unpack77(message77, book);
 	if (!success || msg.trim().length === 0) return null;
 
 	// Estimate SNR
