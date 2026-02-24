@@ -67,7 +67,7 @@ At its maximum depth mode (Depth 3), it successfully decodes 14 messages, outper
 ### API
 
 ```typescript
-import { encodeFT8, decodeFT8 } from "@e04/ft8ts";
+import { encodeFT8, decodeFT8, HashCallBook } from "@e04/ft8ts";
 
 // Encode a message to audio samples (Float32Array)
 const samples = encodeFT8("CQ JK1IFA PM95", {
@@ -75,11 +75,17 @@ const samples = encodeFT8("CQ JK1IFA PM95", {
   baseFrequency: 1000,
 });
 
+// Create a HashCallBook to resolve hashed callsigns.
+// Reuse the same instance across multiple decode calls so that
+// callsigns learned from earlier frames can resolve hashes in later ones.
+const book = new HashCallBook();
+
 // Decode audio samples to messages
 const decoded = decodeFT8(samples, 12000, {
   freqLow: 200,
   freqHigh: 3000,
   depth: 2,
+  hashCallBook: book,
 });
 
 for (const d of decoded) {
@@ -96,10 +102,11 @@ for (const d of decoded) {
 | `syncMin` | 1.2 | Minimum sync threshold |
 | `depth` | 2 | Decoding depth: 1=fast BP only, 2=BP+OSD, 3=deep |
 | `maxCandidates` | 300 | Maximum candidates to process |
+| `hashCallBook` | — | `HashCallBook` instance for resolving hashed callsigns |
 
 ## ToDo
 
-- [ ] Add save_hash_call-style hash tables to the TypeScript port so that h10/h12/h22 hash references can be resolved to callsigns (e.g. <YW18FIFA>) instead of always showing <...>.
+- [ ] FT4 Support
 
 ## Build
 

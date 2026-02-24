@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import { decode } from "../src/ft8/decode.js";
 import { encode174_91, getTones } from "../src/ft8/encode.js";
+import { HashCallBook } from "../src/util/hashcall.js";
 import { pack77 } from "../src/util/pack_jt77.js";
 import { unpack77 } from "../src/util/unpack_jt77.js";
 import { parseWavBuffer } from "../src/util/wav.js";
@@ -12,10 +13,8 @@ import { generateFT8Waveform } from "../src/util/waveform.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAMPLE_RATE = 12_000;
 
-/** Hashed callsigns (<CALL>) become <...> when unpacking. Normalize expected value. */
-function replaceHashedCallsign(msg: string): string {
-	return msg.replace(/<[^>]+>/g, "<...>").trim().toUpperCase();
-}
+/** Callsigns that appear as hashes in ROUND_TRIP_MESSAGES. */
+const KNOWN_CALLSIGNS = ["W9XYZ", "KA1ABC"] as const;
 
 const ROUND_TRIP_MESSAGES = [
 	"CQ JK1IFA PM95",
@@ -28,24 +27,31 @@ const ROUND_TRIP_MESSAGES = [
 	"TNX BOB 73 GL",
 	"G4ABC/P PA9XYZ JO22",
 	"PA9XYZ G4ABC/P RR73",
-	"PJ4/K1ABC <W9XYZ>",
-	"PJ4/K1ABC <W9XYZ> 73",
-	"YW18FIFA <W9XYZ> RRR",
-	"<KA1ABC> YW18FIFA RR73",
+	`PJ4/K1ABC <${KNOWN_CALLSIGNS[0]}>`,
+	`PJ4/K1ABC <${KNOWN_CALLSIGNS[0]}> 73`,
+	`YW18FIFA <${KNOWN_CALLSIGNS[0]}> RRR`,
+	`<${KNOWN_CALLSIGNS[1]}> YW18FIFA RR73`,
 ];
+
+function makeBookWithKnownCalls(): HashCallBook {
+	const book = new HashCallBook();
+	for (const call of KNOWN_CALLSIGNS) book.save(call);
+	return book;
+}
 
 describe("Unpack77", () => {
 	test.each(ROUND_TRIP_MESSAGES)('unpack matches original: "%s"', (msg) => {
+		const book = makeBookWithKnownCalls();
 		const bits77 = pack77(msg);
-		const { msg: unpacked, success } = unpack77(bits77);
+		const { msg: unpacked, success } = unpack77(bits77, book);
 		expect(success).toBe(true);
-		// Hashed callsigns (<CALL>) become <...> when unpacking
-		expect(unpacked.trim().toUpperCase()).toBe(replaceHashedCallsign(msg));
+		expect(unpacked).toBe(msg);
 	});
 });
 
 describe("FT8 Round Trip", () => {
 	test.each(ROUND_TRIP_MESSAGES)('encode then decode: "%s"', (msg) => {
+		const book = makeBookWithKnownCalls();
 		const bits77 = pack77(msg);
 		const codeword = encode174_91(bits77);
 		const tones = getTones(codeword);
@@ -70,9 +76,10 @@ describe("FT8 Round Trip", () => {
 			freqHigh: 1500,
 			syncMin: 1.0,
 			depth: 2,
+			hashCallBook: book,
 		});
 
-		const expected = replaceHashedCallsign(msg);
+		const expected = msg;
 		const found = decoded.find((d) => d.msg.trim().toUpperCase() === expected);
 		expect(found).toBeDefined();
 		if (found) {
