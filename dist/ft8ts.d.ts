@@ -1,3 +1,51 @@
+/**
+ * Hash call table – TypeScript port of the hash call storage from packjt77.f90
+ *
+ * In FT8, nonstandard callsigns are transmitted as hashes (10-, 12-, or 22-bit).
+ * When a full callsign is decoded from a standard message, it is stored in this
+ * table so that future hashed references to it can be resolved.
+ *
+ * Mirrors Fortran: save_hash_call, hash10, hash12, hash22, ihashcall
+ */
+/**
+ * Maintains a callsign ↔ hash lookup table for resolving hashed FT8 callsigns.
+ *
+ * Usage:
+ * ```ts
+ * const book = new HashCallBook();
+ * const decoded = decodeFT8(samples, sampleRate, { hashCallBook: book });
+ * // `book` now contains callsigns learned from decoded messages.
+ * // Subsequent calls reuse the same book to resolve hashed callsigns:
+ * const decoded2 = decodeFT8(samples2, sampleRate, { hashCallBook: book });
+ * ```
+ *
+ * You can also pre-populate the book with known callsigns:
+ * ```ts
+ * book.save("W9XYZ");
+ * book.save("PJ4/K1ABC");
+ * ```
+ */
+declare class HashCallBook {
+    private readonly calls10;
+    private readonly calls12;
+    private readonly hash22Entries;
+    /**
+     * Store a callsign in all three hash tables (10, 12, 22-bit).
+     * Strips angle brackets if present. Ignores `<...>` and blank/short strings.
+     */
+    save(callsign: string): void;
+    /** Look up a callsign by its 10-bit hash. Returns `null` if not found. */
+    lookup10(n10: number): string | null;
+    /** Look up a callsign by its 12-bit hash. Returns `null` if not found. */
+    lookup12(n12: number): string | null;
+    /** Look up a callsign by its 22-bit hash. Returns `null` if not found. */
+    lookup22(n22: number): string | null;
+    /** Number of entries in the 22-bit hash table. */
+    get size(): number;
+    /** Remove all stored entries. */
+    clear(): void;
+}
+
 interface DecodedMessage {
     freq: number;
     dt: number;
@@ -16,6 +64,14 @@ interface DecodeOptions {
     depth?: number;
     /** Maximum candidates to process */
     maxCandidates?: number;
+    /**
+     * Hash call book for resolving hashed callsigns.
+     * When provided, decoded standard callsigns are saved into the book,
+     * and hashed callsigns (e.g. `<...>`) are resolved from it.
+     * Pass the same instance across multiple `decode` calls to accumulate
+     * callsign knowledge over time.
+     */
+    hashCallBook?: HashCallBook;
 }
 /**
  * Decode all FT8 signals in an audio buffer.
@@ -32,5 +88,5 @@ interface WaveformOptions {
 
 declare function encode(msg: string, options?: WaveformOptions): Float32Array;
 
-export { decode as decodeFT8, encode as encodeFT8 };
+export { HashCallBook, decode as decodeFT8, encode as encodeFT8 };
 export type { DecodeOptions, DecodedMessage };
