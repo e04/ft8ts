@@ -684,7 +684,7 @@ function bitsToUint(bits, start, len) {
     }
     return val;
 }
-function unpack28(n28) {
+function unpack28(n28, book) {
     if (n28 < 0 || n28 >= 268435456)
         return { call: "", success: false };
     if (n28 === 0)
@@ -698,7 +698,6 @@ function unpack28(n28) {
         return { call: `CQ ${nqsy.toString().padStart(3, "0")}`, success: true };
     }
     if (n28 >= 1003 && n28 < NTOKENS) {
-        // CQ with 4-letter directed call
         let m = n28 - 1003;
         let chars = "";
         for (let i = 3; i >= 0; i--) {
@@ -712,7 +711,10 @@ function unpack28(n28) {
         return { call: "CQ", success: true };
     }
     if (n28 >= NTOKENS && n28 < NTOKENS + MAX22) {
-        // Hashed call – we don't have a hash table, so show <...>
+        const n22 = n28 - NTOKENS;
+        const resolved = book?.lookup22(n22);
+        if (resolved)
+            return { call: `<${resolved}>`, success: true };
         return { call: "<...>", success: true };
     }
     // Standard callsign
@@ -792,8 +794,11 @@ function unpackText77(bits71) {
 }
 /**
  * Unpack a 77-bit FT8 message into a human-readable string.
+ *
+ * When a {@link HashCallBook} is provided, hashed callsigns are resolved from
+ * the book, and newly decoded standard callsigns are saved into it.
  */
-function unpack77(bits77) {
+function unpack77(bits77, book) {
     const n3 = bitsToUint(bits77, 71, 3);
     const i3 = bitsToUint(bits77, 74, 3);
     if (i3 === 0 && n3 === 0) {
@@ -811,8 +816,8 @@ function unpack77(bits77) {
         const ipb = bits77[57];
         const ir = bits77[58];
         const igrid4 = bitsToUint(bits77, 59, 15);
-        const { call: call1, success: ok1 } = unpack28(n28a);
-        const { call: call2Raw, success: ok2 } = unpack28(n28b);
+        const { call: call1, success: ok1 } = unpack28(n28a, book);
+        const { call: call2Raw, success: ok2 } = unpack28(n28b, book);
         if (!ok1 || !ok2)
             return { msg: "", success: false };
         let c1 = call1;
@@ -830,6 +835,9 @@ function unpack77(bits77) {
                 c2 += "/R";
             if (ipb === 1 && i3 === 2 && c2.length >= 3)
                 c2 += "/P";
+            // Save the "from" call (call_2) into the hash book
+            if (book && c2.length >= 3)
+                book.save(c2);
         }
         if (igrid4 <= MAXGRID4) {
             const { grid, success: gridOk } = toGrid4(igrid4);
@@ -862,6 +870,7 @@ function unpack77(bits77) {
     }
     if (i3 === 4) {
         // Type 4: One nonstandard call
+        const n12 = bitsToUint(bits77, 0, 12);
         let n58 = 0n;
         for (let i = 0; i < 58; i++) {
             n58 = n58 * 2n + BigInt(bits77[12 + i] ?? 0);
@@ -869,7 +878,6 @@ function unpack77(bits77) {
         const iflip = bits77[70];
         const nrpt = bitsToUint(bits77, 71, 2);
         const icq = bits77[73];
-        // Decode n58 to 11-char string using C38 alphabet
         const c11chars = [];
         let remain = n58;
         for (let i = 10; i >= 0; i--) {
@@ -878,12 +886,15 @@ function unpack77(bits77) {
             c11chars.unshift(C38[j] ?? " ");
         }
         const c11 = c11chars.join("").trim();
-        const call3 = "<...>"; // We don't have a hash table for n12
+        const resolved = book?.lookup12(n12);
+        const call3 = resolved ? `<${resolved}>` : "<...>";
         let call1;
         let call2;
         if (iflip === 0) {
             call1 = call3;
             call2 = c11;
+            if (book)
+                book.save(c11);
         }
         else {
             call1 = c11;
@@ -918,6 +929,7 @@ function decode(samples, sampleRate = SAMPLE_RATE, options = {}) {
     const syncmin = options.syncMin ?? 1.2;
     const depth = options.depth ?? 2;
     const maxCandidates = options.maxCandidates ?? 300;
+    const book = options.hashCallBook;
     // Resample to 12000 Hz if needed
     let dd;
     if (sampleRate === SAMPLE_RATE) {
@@ -942,7 +954,7 @@ function decode(samples, sampleRate = SAMPLE_RATE, options = {}) {
     const decoded = [];
     const seenMessages = new Set();
     for (const cand of candidates) {
-        const result = ft8b(dd, cxRe, cxIm, cand.freq, cand.dt, sbase, depth);
+        const result = ft8b(dd, cxRe, cxIm, cand.freq, cand.dt, sbase, depth, book);
         if (!result)
             continue;
         if (seenMessages.has(result.msg))
@@ -1126,7 +1138,7 @@ function computeBaseline(savg, nfa, nfb, df, nh1) {
     }
     return sbase;
 }
-function ft8b(dd0, cxRe, cxIm, f1, xdt, _sbase, depth) {
+function ft8b(_dd0, cxRe, cxIm, f1, xdt, _sbase, depth, book) {
     const NFFT2 = 3200;
     const NP2 = 2812;
     const fs2 = SAMPLE_RATE / NDOWN;
@@ -1334,7 +1346,7 @@ function ft8b(dd0, cxRe, cxIm, f1, xdt, _sbase, depth) {
     if (i3v === 0 && n3v === 2)
         return null;
     // Unpack
-    const { msg, success } = unpack77(message77);
+    const { msg, success } = unpack77(message77, book);
     if (!success || msg.trim().length === 0)
         return null;
     // Estimate SNR
@@ -2201,5 +2213,111 @@ function encode(msg, options = {}) {
     return generateFT8Waveform(encodeMessage(msg), options);
 }
 
-export { decode as decodeFT8, encode as encodeFT8 };
+/**
+ * Hash call table – TypeScript port of the hash call storage from packjt77.f90
+ *
+ * In FT8, nonstandard callsigns are transmitted as hashes (10-, 12-, or 22-bit).
+ * When a full callsign is decoded from a standard message, it is stored in this
+ * table so that future hashed references to it can be resolved.
+ *
+ * Mirrors Fortran: save_hash_call, hash10, hash12, hash22, ihashcall
+ */
+const MAGIC = 47055833459n;
+const MAX_HASH22_ENTRIES = 1000;
+function ihashcall(c0, m) {
+    const s = c0.padEnd(11, " ").slice(0, 11).toUpperCase();
+    let n8 = 0n;
+    for (let i = 0; i < 11; i++) {
+        const j = C38.indexOf(s[i] ?? " ");
+        n8 = 38n * n8 + BigInt(j < 0 ? 0 : j);
+    }
+    const prod = BigInt.asUintN(64, MAGIC * n8);
+    return Number(prod >> BigInt(64 - m)) & ((1 << m) - 1);
+}
+/**
+ * Maintains a callsign ↔ hash lookup table for resolving hashed FT8 callsigns.
+ *
+ * Usage:
+ * ```ts
+ * const book = new HashCallBook();
+ * const decoded = decodeFT8(samples, sampleRate, { hashCallBook: book });
+ * // `book` now contains callsigns learned from decoded messages.
+ * // Subsequent calls reuse the same book to resolve hashed callsigns:
+ * const decoded2 = decodeFT8(samples2, sampleRate, { hashCallBook: book });
+ * ```
+ *
+ * You can also pre-populate the book with known callsigns:
+ * ```ts
+ * book.save("W9XYZ");
+ * book.save("PJ4/K1ABC");
+ * ```
+ */
+class HashCallBook {
+    calls10 = new Map();
+    calls12 = new Map();
+    hash22Entries = [];
+    /**
+     * Store a callsign in all three hash tables (10, 12, 22-bit).
+     * Strips angle brackets if present. Ignores `<...>` and blank/short strings.
+     */
+    save(callsign) {
+        let cw = callsign.trim().toUpperCase();
+        if (cw === "" || cw === "<...>")
+            return;
+        if (cw.startsWith("<"))
+            cw = cw.slice(1);
+        const gt = cw.indexOf(">");
+        if (gt >= 0)
+            cw = cw.slice(0, gt);
+        cw = cw.trim();
+        if (cw.length < 3)
+            return;
+        const n10 = ihashcall(cw, 10);
+        if (n10 >= 0 && n10 <= 1023)
+            this.calls10.set(n10, cw);
+        const n12 = ihashcall(cw, 12);
+        if (n12 >= 0 && n12 <= 4095)
+            this.calls12.set(n12, cw);
+        const n22 = ihashcall(cw, 22);
+        const existing = this.hash22Entries.findIndex((e) => e.hash === n22);
+        if (existing >= 0) {
+            this.hash22Entries[existing].call = cw;
+        }
+        else {
+            if (this.hash22Entries.length >= MAX_HASH22_ENTRIES) {
+                this.hash22Entries.pop();
+            }
+            this.hash22Entries.unshift({ hash: n22, call: cw });
+        }
+    }
+    /** Look up a callsign by its 10-bit hash. Returns `null` if not found. */
+    lookup10(n10) {
+        if (n10 < 0 || n10 > 1023)
+            return null;
+        return this.calls10.get(n10) ?? null;
+    }
+    /** Look up a callsign by its 12-bit hash. Returns `null` if not found. */
+    lookup12(n12) {
+        if (n12 < 0 || n12 > 4095)
+            return null;
+        return this.calls12.get(n12) ?? null;
+    }
+    /** Look up a callsign by its 22-bit hash. Returns `null` if not found. */
+    lookup22(n22) {
+        const entry = this.hash22Entries.find((e) => e.hash === n22);
+        return entry?.call ?? null;
+    }
+    /** Number of entries in the 22-bit hash table. */
+    get size() {
+        return this.hash22Entries.length;
+    }
+    /** Remove all stored entries. */
+    clear() {
+        this.calls10.clear();
+        this.calls12.clear();
+        this.hash22Entries.length = 0;
+    }
+}
+
+export { HashCallBook, decode as decodeFT8, encode as encodeFT8 };
 //# sourceMappingURL=ft8ts.mjs.map
