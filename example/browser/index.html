@@ -91,7 +91,7 @@
   </section>
 
   <script type="module">
-    import { encodeFT8, decodeFT8 } from '../../dist/ft8ts.mjs';
+    import { decodeFT8, encodeFT8 } from '../../dist/ft8ts.mjs';
 
     const SAMPLE_RATE = 12000;
     const RECORD_DURATION = 15;
@@ -135,7 +135,7 @@
           encodeBtn.disabled = false;
         };
       } catch (e) {
-        encodeStatus.textContent = 'Error: ' + (e.message || e);
+        encodeStatus.textContent = `Error: ${e.message || e}`;
         encodeStatus.className = 'status error';
         encodeBtn.disabled = false;
       }
@@ -172,7 +172,7 @@
           if (totalSamples >= targetSamples) {
             source.disconnect();
             processor.disconnect();
-            stream.getTracks().forEach((t) => t.stop());
+            stream.getTracks().forEach((t) => { t.stop(); });
           }
         };
 
@@ -241,7 +241,7 @@
         }
       } catch (e) {
         decodeOutput.innerHTML = '';
-        decodeStatus.textContent = 'Error: ' + (e.message || e);
+        decodeStatus.textContent = `Error: ${e.message || e}`;
         decodeStatus.className = 'status error';
       }
       decodeBtn.disabled = false;
