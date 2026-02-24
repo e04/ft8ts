@@ -6,7 +6,9 @@ FT8 encoder and decoder in TypeScript. A port of the Fortran implementation from
 
 ## Overview
 
-FT8 is a digital amateur radio mode designed for weak-signal communication. This library provides pure TypeScript implementations of both encoding and decoding, suitable for use in Node.js or the browser.
+FT8 is a digital amateur radio mode designed for weak-signal communication, developed by Joe Taylor (K1JT) and Steve Franke (K9AN).
+
+This library provides pure TypeScript implementations of both encoding and decoding, suitable for use in Node.js or the browser.
 
 ## Demo
 
@@ -32,27 +34,27 @@ npx tsx example/decode-ft8-wav.ts ./src/__test__/190227_155815.wav [--low 200] [
 
 The benchmark below was compiled with reference to [Comparing PyFT8 with WSJT-x and FT8_lib](https://www.reddit.com/r/amateurradio/comments/1qt27ss/comparing_pyft8_with_wsjtx_and_ft8_lib/).
 
-| Call a | Call b | Message | WSJT-x (FAST) | [PyFT8](https://github.com/G1OJS/PyFT8) | [ft8_lib](https://github.com/kgoba/ft8_lib) | ft8ts (depth=1) | ft8ts (depth=2) | ft8ts (depth=3) |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| W1FC | F5BZB | -8 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| WM3PEN | EA6VQ | -9 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| CQ | F5RXL | IN94 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| N1JFU | EA6EE | R-07 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| A92EE | F5PSR | -14 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| K1BZM | EA3GP | -9 | ☑️ | ☑️ | | ☑️ | ☑️ | ☑️ |
-| W0RSJ | EA3BMU | RR73 | ☑️ | ☑️ | | ☑️ | ☑️ | ☑️ |
-| K1JT | HA0DU | KN07 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| W1DIG | SV9CVY | -14 | ☑️ | ☑️ | | ☑️ | ☑️ | ☑️ |
-| K1JT | EA3AGB | -15 | ☑️ | ☑️ | | ☑️ | ☑️ | ☑️ |
-| XE2X | HA2NP | RR73 | ☑️ | ☑️ | ☑️ | | | ☑️ |
-| N1PJT | HB9CQK | -10 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| K1BZM | EA3CJ | JN01 | ☑️ | | | | | |
-| KD2UGC | F6GCP | R-23 | ☑️ | | | | | |
-| WA2FZW | DL5AXX | RR73 | | | | | | |
-| N1API | HA6FQ | -23 | | | | | ☑️ | ☑️ |
-| N1API | F2VX | 73 | | | | | | |
-| K1JT | HA5WA | 73 | | | | | ☑️ | ☑️ |
-| CQ | EA2BFM | IN83 | | | | | | |
+| Call a | Call b | Message | WSJT-x(default) | WSJT-x (fast) | [PyFT8](https://github.com/G1OJS/PyFT8) | [ft8_lib](https://github.com/kgoba/ft8_lib) | ft8ts (depth=1) | ft8ts (depth=2) | ft8ts (depth=3) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| W1FC | F5BZB | -8 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| WM3PEN | EA6VQ | -9 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| CQ | F5RXL | IN94 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| N1JFU | EA6EE | R-07 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| A92EE | F5PSR | -14 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| K1BZM | EA3GP | -9 | ☑️ | ☑️ | ☑️ | | ☑️ | ☑️ | ☑️ |
+| W0RSJ | EA3BMU | RR73 | ☑️ | ☑️ | ☑️ | | ☑️ | ☑️ | ☑️ |
+| K1JT | HA0DU | KN07 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| W1DIG | SV9CVY | -14 | ☑️ | ☑️ | ☑️ | | ☑️ | ☑️ | ☑️ |
+| K1JT | EA3AGB | -15 | ☑️ | ☑️ | ☑️ | | ☑️ | ☑️ | ☑️ |
+| XE2X | HA2NP | RR73 | ☑️ | ☑️ | ☑️ | ☑️ | | | ☑️ |
+| N1PJT | HB9CQK | -10 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| K1BZM | EA3CJ | JN01 | ☑️ | ☑️ | | | | | |
+| KD2UGC | F6GCP | R-23 | ☑️ | ☑️ | | | | | |
+| WA2FZW | DL5AXX | RR73 | ☑️ | | | | | | |
+| N1API | HA6FQ | -23 | ☑️ | | | | | ☑️ | ☑️ |
+| N1API | F2VX | 73 | ☑️ | | | | | | |
+| K1JT | HA5WA | 73 | ☑️ | | | | | ☑️ | ☑️ |
+| CQ | EA2BFM | IN83 | ☑️ | | | | | | |
 
 At its maximum depth mode (Depth 3), it successfully decodes 14 messages, outperforming both `PyFT8` (12) and `FT8_lib` (8), and matching the total message count of `WSJT-x FAST mode`.
 
