@@ -71,7 +71,8 @@ describe("FT8 Round Trip", () => {
 			fullBuffer[offset + i] = waveform[i]!;
 		}
 
-		const decoded = decode(fullBuffer, SAMPLE_RATE, {
+		const decoded = decode(fullBuffer, {
+			sampleRate: SAMPLE_RATE,
 			freqLow: 500,
 			freqHigh: 1500,
 			syncMin: 1.0,
@@ -96,7 +97,7 @@ describe("WAV decode: 190227_155815.wav", () => {
 		const wavPath = join(__dirname, "190227_155815.wav");
 		const buf = readFileSync(wavPath);
 		const { sampleRate, samples } = parseWavBuffer(buf);
-		const decoded = decode(samples, sampleRate);
+		const decoded = decode(samples, { sampleRate });
 
 		expect(decoded.length).toBeGreaterThanOrEqual(27);
 	}, 15_000);
@@ -110,7 +111,7 @@ describe("WAV decode: 210703_133430.wav", () => {
 		const wavPath = join(__dirname, "210703_133430.wav");
 		const buf = readFileSync(wavPath);
 		const { sampleRate, samples } = parseWavBuffer(buf);
-		const decoded = decode(samples, sampleRate);
+		const decoded = decode(samples, { sampleRate });
 
 		expect(decoded.length).toBeGreaterThanOrEqual(13);
 	}, 15_000);
