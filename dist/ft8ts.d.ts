@@ -13,10 +13,10 @@
  * Usage:
  * ```ts
  * const book = new HashCallBook();
- * const decoded = decodeFT8(samples, sampleRate, { hashCallBook: book });
+ * const decoded = decodeFT8(samples, { sampleRate, hashCallBook: book });
  * // `book` now contains callsigns learned from decoded messages.
  * // Subsequent calls reuse the same book to resolve hashed callsigns:
- * const decoded2 = decodeFT8(samples2, sampleRate, { hashCallBook: book });
+ * const decoded2 = decodeFT8(samples2, { sampleRate, hashCallBook: book });
  * ```
  *
  * You can also pre-populate the book with known callsigns:
@@ -54,6 +54,8 @@ interface DecodedMessage {
     sync: number;
 }
 interface DecodeOptions {
+    /** Sample rate (Hz), default 12000 */
+    sampleRate?: number;
     /** Lower frequency bound (Hz), default 200 */
     freqLow?: number;
     /** Upper frequency bound (Hz), default 3000 */
@@ -77,7 +79,7 @@ interface DecodeOptions {
  * Decode all FT8 signals in an audio buffer.
  * Input: mono audio samples at `sampleRate` Hz, duration ~15s.
  */
-declare function decode(samples: Float32Array | Float64Array, sampleRate?: number, options?: DecodeOptions): DecodedMessage[];
+declare function decode(samples: Float32Array | Float64Array, options?: DecodeOptions): DecodedMessage[];
 
 interface WaveformOptions {
     sampleRate?: number;

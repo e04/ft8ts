@@ -25,6 +25,8 @@ export interface DecodedMessage {
 }
 
 export interface DecodeOptions {
+	/** Sample rate (Hz), default 12000 */
+	sampleRate?: number;
 	/** Lower frequency bound (Hz), default 200 */
 	freqLow?: number;
 	/** Upper frequency bound (Hz), default 3000 */
@@ -51,9 +53,9 @@ export interface DecodeOptions {
  */
 export function decode(
 	samples: Float32Array | Float64Array,
-	sampleRate: number = SAMPLE_RATE,
 	options: DecodeOptions = {},
 ): DecodedMessage[] {
+	const sampleRate = options.sampleRate ?? SAMPLE_RATE;
 	const nfa = options.freqLow ?? 200;
 	const nfb = options.freqHigh ?? 3000;
 	const syncmin = options.syncMin ?? 1.2;

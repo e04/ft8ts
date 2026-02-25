@@ -205,7 +205,7 @@
         }
 
         decodeStatus.textContent = 'Decoding...';
-        const results = decodeFT8(merged, sampleRate, { hashCallBook });
+        const results = decodeFT8(merged, { sampleRate, hashCallBook });
 
         if (results.length === 0) {
           decodeOutput.textContent = '(No decode results)';

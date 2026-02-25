@@ -30,10 +30,10 @@ function ihashcall(c0: string, m: number): number {
  * Usage:
  * ```ts
  * const book = new HashCallBook();
- * const decoded = decodeFT8(samples, sampleRate, { hashCallBook: book });
+ * const decoded = decodeFT8(samples, { sampleRate, hashCallBook: book });
  * // `book` now contains callsigns learned from decoded messages.
  * // Subsequent calls reuse the same book to resolve hashed callsigns:
- * const decoded2 = decodeFT8(samples2, sampleRate, { hashCallBook: book });
+ * const decoded2 = decodeFT8(samples2, { sampleRate, hashCallBook: book });
  * ```
  *
  * You can also pre-populate the book with known callsigns:

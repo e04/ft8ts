@@ -58,7 +58,7 @@ function main(): void {
 		);
 
 		const startTime = performance.now();
-		const decoded = decodeFT8(samples, sampleRate, options);
+		const decoded = decodeFT8(samples, { ...options, sampleRate });
 		const elapsed = performance.now() - startTime;
 
 		console.log(`\nDecoded ${decoded.length} messages in ${(elapsed / 1000).toFixed(2)}s:\n`);

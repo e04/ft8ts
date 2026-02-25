@@ -925,7 +925,8 @@ function unpack77(bits77, book) {
  * Decode all FT8 signals in an audio buffer.
  * Input: mono audio samples at `sampleRate` Hz, duration ~15s.
  */
-function decode(samples, sampleRate = SAMPLE_RATE, options = {}) {
+function decode(samples, options = {}) {
+    const sampleRate = options.sampleRate ?? SAMPLE_RATE;
     const nfa = options.freqLow ?? 200;
     const nfb = options.freqHigh ?? 3000;
     const syncmin = options.syncMin ?? 1.2;
@@ -2242,10 +2243,10 @@ function ihashcall(c0, m) {
  * Usage:
  * ```ts
  * const book = new HashCallBook();
- * const decoded = decodeFT8(samples, sampleRate, { hashCallBook: book });
+ * const decoded = decodeFT8(samples, { sampleRate, hashCallBook: book });
  * // `book` now contains callsigns learned from decoded messages.
  * // Subsequent calls reuse the same book to resolve hashed callsigns:
- * const decoded2 = decodeFT8(samples2, sampleRate, { hashCallBook: book });
+ * const decoded2 = decodeFT8(samples2, { sampleRate, hashCallBook: book });
  * ```
  *
  * You can also pre-populate the book with known callsigns:

@@ -26,7 +26,8 @@ describe("WAV round-trip", () => {
 		try {
 			const buf = readFileSync(wavPath);
 			const { sampleRate, samples } = parseWavBuffer(buf);
-			const decoded = decode(samples, sampleRate, {
+			const decoded = decode(samples, {
+				sampleRate,
 				freqLow: 500,
 				freqHigh: 1500,
 				syncMin: 1.0,

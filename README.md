@@ -81,7 +81,8 @@ const samples = encodeFT8("CQ JK1IFA PM95", {
 const book = new HashCallBook();
 
 // Decode audio samples to messages
-const decoded = decodeFT8(samples, 12000, {
+const decoded = decodeFT8(samples, {
+  sampleRate: 12000,
   freqLow: 200,
   freqHigh: 3000,
   depth: 2,
@@ -97,6 +98,7 @@ for (const d of decoded) {
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `sampleRate` | 12000 | Input audio sample rate (Hz) |
 | `freqLow` | 200 | Lower frequency bound (Hz) |
 | `freqHigh` | 3000 | Upper frequency bound (Hz) |
 | `syncMin` | 1.2 | Minimum sync threshold |
