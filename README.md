@@ -18,16 +18,12 @@ https://e04.github.io/ft8ts/example/browser/index.html
 
 ### CLI
 
-#### Encode
-
 ```bash
-npx tsx example/generate-ft8-wav.ts "CQ JK1IFA PM95" [--out output.wav] [--df 1000]
-```
+# Decode WAV file
+npx @e04/ft8ts decode foo.wav [--low 200] [--high 3000] [--depth 2]
 
-#### Decode
-
-```bash
-npx tsx example/decode-ft8-wav.ts ./src/__test__/190227_155815.wav [--low 200] [--high 3000] [--depth 2]
+# Encode message to WAV file
+npx @e04/ft8ts encode "CQ JK1IFA PM95" [--out output.wav] [--df 1000]
 ```
 
 ## Benchmark
