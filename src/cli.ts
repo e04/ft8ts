@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import {
 	type DecodedMessage,
 	type DecodeOptions,
+	decodeFT4,
 	decodeFT8,
 	encodeFT8,
 } from "./index.js";
@@ -21,6 +22,7 @@ Usage:
   ft8ts encode "<message>" [options]
 
 Decode options:
+  --mode <ft8|ft4>  Mode: ft8 (default) or ft4
   --low <hz>     Lower frequency bound (default: 200)
   --high <hz>    Upper frequency bound (default: 3000)
   --depth <1|2|3>  Decoding depth (default: 2)
@@ -47,10 +49,18 @@ function runDecode(argv: string[]): void {
 
 	const wavFile = argv[0]!;
 	const options: DecodeOptions = {};
+	let mode: "ft8" | "ft4" = "ft8";
 
 	for (let i = 1; i < argv.length; i++) {
 		const arg = argv[i]!;
-		if (arg === "--low") {
+		if (arg === "--mode") {
+			const value = argv[++i];
+			if (value === "ft8" || value === "ft4") {
+				mode = value;
+			} else {
+				throw new Error(`Invalid --mode: ${value ?? "(missing)"}. Use ft8 or ft4`);
+			}
+		} else if (arg === "--low") {
 			options.freqLow = Number(argv[++i]);
 		} else if (arg === "--high") {
 			options.freqHigh = Number(argv[++i]);
@@ -70,7 +80,10 @@ function runDecode(argv: string[]): void {
 	);
 
 	const startTime = performance.now();
-	const decoded = decodeFT8(samples, { ...options, sampleRate });
+	const decoded =
+		mode === "ft4"
+			? decodeFT4(samples, { ...options, sampleRate })
+			: decodeFT8(samples, { ...options, sampleRate });
 	const elapsed = performance.now() - startTime;
 
 	console.log(`\nDecoded ${decoded.length} messages in ${(elapsed / 1000).toFixed(2)}s:\n`);

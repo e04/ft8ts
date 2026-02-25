@@ -2,42 +2,16 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
-import { decode } from "../src/ft8/decode.js";
-import { encode174_91, getTones } from "../src/ft8/encode.js";
-import { HashCallBook } from "../src/util/hashcall.js";
-import { pack77 } from "../src/util/pack_jt77.js";
-import { unpack77 } from "../src/util/unpack_jt77.js";
-import { parseWavBuffer } from "../src/util/wav.js";
-import { generateFT8Waveform } from "../src/util/waveform.js";
+import { decode } from "../../src/ft8/decode.js";
+import { encode174_91, getTones } from "../../src/ft8/encode.js";
+import { pack77 } from "../../src/util/pack_jt77.js";
+import { unpack77 } from "../../src/util/unpack_jt77.js";
+import { parseWavBuffer } from "../../src/util/wav.js";
+import { generateFT8Waveform } from "../../src/util/waveform.js";
+import { makeBookWithKnownCalls, ROUND_TRIP_MESSAGES } from "../test-messages.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAMPLE_RATE = 12_000;
-
-/** Callsigns that appear as hashes in ROUND_TRIP_MESSAGES. */
-const KNOWN_CALLSIGNS = ["W9XYZ", "KA1ABC"] as const;
-
-const ROUND_TRIP_MESSAGES = [
-	"CQ JK1IFA PM95",
-	"K1ABC W9XYZ EN37",
-	"W9XYZ K1ABC -11",
-	"K1ABC W9XYZ R-09",
-	"W9XYZ K1ABC RRR",
-	"K1ABC W9XYZ 73",
-	"K1ABC W9XYZ RR73",
-	"TNX BOB 73 GL",
-	"G4ABC/P PA9XYZ JO22",
-	"PA9XYZ G4ABC/P RR73",
-	`PJ4/K1ABC <${KNOWN_CALLSIGNS[0]}>`,
-	`PJ4/K1ABC <${KNOWN_CALLSIGNS[0]}> 73`,
-	`YW18FIFA <${KNOWN_CALLSIGNS[0]}> RRR`,
-	`<${KNOWN_CALLSIGNS[1]}> YW18FIFA RR73`,
-];
-
-function makeBookWithKnownCalls(): HashCallBook {
-	const book = new HashCallBook();
-	for (const call of KNOWN_CALLSIGNS) book.save(call);
-	return book;
-}
 
 describe("Unpack77", () => {
 	test.each(ROUND_TRIP_MESSAGES)('unpack matches original: "%s"', (msg) => {

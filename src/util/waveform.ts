@@ -1,7 +1,13 @@
 const TWO_PI = 2 * Math.PI;
-const DEFAULT_SAMPLE_RATE = 12_000;
-const DEFAULT_SAMPLES_PER_SYMBOL = 1_920;
-const DEFAULT_BT = 2.0;
+const FT8_DEFAULT_SAMPLE_RATE = 12_000;
+const FT8_DEFAULT_SAMPLES_PER_SYMBOL = 1_920;
+const FT8_DEFAULT_BT = 2.0;
+
+import { NSPS as FT4_NSPS } from "../ft4/constants.js";
+
+const FT4_DEFAULT_SAMPLE_RATE = 12_000;
+const FT4_DEFAULT_SAMPLES_PER_SYMBOL = FT4_NSPS;
+const FT4_DEFAULT_BT = 1.0;
 const MODULATION_INDEX = 1.0;
 
 export interface WaveformOptions {
@@ -9,6 +15,17 @@ export interface WaveformOptions {
 	samplesPerSymbol?: number;
 	bt?: number;
 	baseFrequency?: number;
+}
+
+interface WaveformDefaults {
+	sampleRate: number;
+	samplesPerSymbol: number;
+	bt: number;
+}
+
+interface WaveformShape {
+	includeRampSymbols: boolean;
+	fullSymbolRamp: boolean;
 }
 
 function assertPositiveFinite(value: number, name: string): void {
@@ -36,19 +53,20 @@ function gfskPulse(bt: number, tt: number): number {
 	return 0.5 * (erfApprox(scale * (tt + 0.5)) - erfApprox(scale * (tt - 0.5)));
 }
 
-export function generateFT8Waveform(
+function generateGfskWaveform(
 	tones: readonly number[],
-	options: WaveformOptions = {},
+	options: WaveformOptions,
+	defaults: WaveformDefaults,
+	shape: WaveformShape,
 ): Float32Array {
-	// Mirrors the FT8 path in lib/ft8/gen_ft8wave.f90.
 	const nsym = tones.length;
 	if (nsym === 0) {
 		return new Float32Array(0);
 	}
 
-	const sampleRate = options.sampleRate ?? DEFAULT_SAMPLE_RATE;
-	const nsps = options.samplesPerSymbol ?? DEFAULT_SAMPLES_PER_SYMBOL;
-	const bt = options.bt ?? DEFAULT_BT;
+	const sampleRate = options.sampleRate ?? defaults.sampleRate;
+	const nsps = options.samplesPerSymbol ?? defaults.samplesPerSymbol;
+	const bt = options.bt ?? defaults.bt;
 	const f0 = options.baseFrequency ?? 0;
 
 	assertPositiveFinite(sampleRate, "sampleRate");
@@ -61,7 +79,7 @@ export function generateFT8Waveform(
 		throw new Error("samplesPerSymbol must be an integer");
 	}
 
-	const nwave = nsym * nsps;
+	const nwave = (shape.includeRampSymbols ? nsym + 2 : nsym) * nsps;
 	const pulse = new Float64Array(3 * nsps);
 	for (let i = 0; i < pulse.length; i++) {
 		const tt = (i + 1 - 1.5 * nsps) / nsps;
@@ -94,8 +112,9 @@ export function generateFT8Waveform(
 
 	const wave = new Float32Array(nwave);
 	let phi = 0;
+	const phaseStart = shape.includeRampSymbols ? 0 : nsps;
 	for (let k = 0; k < nwave; k++) {
-		const j = nsps + k; // skip the leading dummy symbol
+		const j = phaseStart + k;
 		wave[k] = Math.sin(phi);
 		phi += dphi[j]!;
 		phi %= TWO_PI;
@@ -104,17 +123,70 @@ export function generateFT8Waveform(
 		}
 	}
 
-	const nramp = Math.round(nsps / 8);
-	for (let i = 0; i < nramp; i++) {
-		const up = (1 - Math.cos((TWO_PI * i) / (2 * nramp))) / 2;
-		wave[i]! *= up;
-	}
+	if (shape.fullSymbolRamp) {
+		for (let i = 0; i < nsps; i++) {
+			const up = (1 - Math.cos((TWO_PI * i) / (2 * nsps))) / 2;
+			wave[i]! *= up;
+		}
 
-	const tailStart = nwave - nramp;
-	for (let i = 0; i < nramp; i++) {
-		const down = (1 + Math.cos((TWO_PI * i) / (2 * nramp))) / 2;
-		wave[tailStart + i]! *= down;
+		const tailStart = (nsym + 1) * nsps;
+		for (let i = 0; i < nsps; i++) {
+			const down = (1 + Math.cos((TWO_PI * i) / (2 * nsps))) / 2;
+			wave[tailStart + i]! *= down;
+		}
+	} else {
+		const nramp = Math.round(nsps / 8);
+		for (let i = 0; i < nramp; i++) {
+			const up = (1 - Math.cos((TWO_PI * i) / (2 * nramp))) / 2;
+			wave[i]! *= up;
+		}
+
+		const tailStart = nwave - nramp;
+		for (let i = 0; i < nramp; i++) {
+			const down = (1 + Math.cos((TWO_PI * i) / (2 * nramp))) / 2;
+			wave[tailStart + i]! *= down;
+		}
 	}
 
 	return wave;
+}
+
+export function generateFT8Waveform(
+	tones: readonly number[],
+	options: WaveformOptions = {},
+): Float32Array {
+	// Mirrors the FT8 path in lib/ft8/gen_ft8wave.f90.
+	return generateGfskWaveform(
+		tones,
+		options,
+		{
+			sampleRate: FT8_DEFAULT_SAMPLE_RATE,
+			samplesPerSymbol: FT8_DEFAULT_SAMPLES_PER_SYMBOL,
+			bt: FT8_DEFAULT_BT,
+		},
+		{
+			includeRampSymbols: false,
+			fullSymbolRamp: false,
+		},
+	);
+}
+
+export function generateFT4Waveform(
+	tones: readonly number[],
+	options: WaveformOptions = {},
+): Float32Array {
+	// Mirrors lib/ft4/gen_ft4wave.f90.
+	return generateGfskWaveform(
+		tones,
+		options,
+		{
+			sampleRate: FT4_DEFAULT_SAMPLE_RATE,
+			samplesPerSymbol: FT4_DEFAULT_SAMPLES_PER_SYMBOL,
+			bt: FT4_DEFAULT_BT,
+		},
+		{
+			includeRampSymbols: true,
+			fullSymbolRamp: true,
+		},
+	);
 }

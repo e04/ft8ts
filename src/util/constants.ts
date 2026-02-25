@@ -1,20 +1,11 @@
+/** Shared constants used by FT8, FT4, pack77, etc. */
+
 export const SAMPLE_RATE = 12_000;
-export const NSPS = 1920;
-export const NFFT1 = 2 * NSPS; // 3840
-export const NH1 = NFFT1 / 2; // 1920
-export const NSTEP = NSPS / 4; // 480
-export const NMAX = 15 * SAMPLE_RATE; // 180000
-export const NHSYM = Math.floor(NMAX / NSTEP) - 3; // 372
-export const NDOWN = 60;
-export const NN = 79;
-export const NS = 21;
-export const ND = 58;
+
+/** LDPC(174,91) code (shared by FT8 and FT4). */
 export const KK = 91;
 export const N_LDPC = 174;
 export const M_LDPC = N_LDPC - KK; // 83
-
-export const icos7 = [3, 1, 4, 0, 6, 5, 2] as const;
-export const graymap = [0, 1, 3, 2, 5, 6, 4, 7] as const;
 
 export const gHex = [
 	"8329ce11bf31eaf509f27fc",

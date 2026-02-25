@@ -2,13 +2,13 @@
 
 [![Tests](https://github.com/e04/ft8ts/actions/workflows/test.yml/badge.svg)](https://github.com/e04/ft8ts/actions/workflows/test.yml)
 
-FT8 encoder and decoder in TypeScript. A port of the Fortran implementation from [WSJT-X](https://wsjt.sourceforge.io/wsjtx.html) v2.7.0.
+FT8 and FT4 encoder and decoder in pure TypeScript. A port of the Fortran implementation from [WSJT-X](https://wsjt.sourceforge.io/wsjtx.html) v2.7.0.
 
 ## Overview
 
-FT8 is a digital amateur radio mode designed for weak-signal communication, developed by Joe Taylor (K1JT) and Steve Franke (K9AN).
+FT8 and FT4 are digital amateur radio modes designed for weak-signal communication, developed by Joe Taylor (K1JT) and Steve Franke (K9AN).
 
-This library provides pure TypeScript implementations of both encoding and decoding, suitable for use in Node.js or the browser.
+This library provides pure TypeScript implementations of both encoding and decoding for FT8 and FT4, suitable for use in Node.js or the browser.
 
 ## Demo
 
@@ -19,8 +19,8 @@ https://e04.github.io/ft8ts/example/browser/index.html
 ### CLI
 
 ```bash
-# Decode WAV file
-npx @e04/ft8ts decode foo.wav [--low 200] [--high 3000] [--depth 2]
+# Decode WAV file (FT8 or FT4)
+npx @e04/ft8ts decode foo.wav [--mode ft8|ft4] [--low 200] [--high 3000] [--depth 2]
 
 # Encode message to WAV file
 npx @e04/ft8ts encode "CQ JK1IFA PM95" [--out output.wav] [--df 1000]
@@ -63,7 +63,7 @@ At its maximum depth mode (Depth 3), it successfully decodes 14 messages, outper
 ### API
 
 ```typescript
-import { encodeFT8, decodeFT8, HashCallBook } from "@e04/ft8ts";
+import { encodeFT8, decodeFT8, encodeFT4, decodeFT4, HashCallBook } from "@e04/ft8ts";
 
 // Encode a message to audio samples (Float32Array)
 const samples = encodeFT8("CQ JK1IFA PM95", {
@@ -90,6 +90,28 @@ for (const d of decoded) {
 }
 ```
 
+### FT4
+
+```typescript
+import { encodeFT4, decodeFT4, HashCallBook } from "@e04/ft8ts";
+
+// Encode FT4 message
+const samples = encodeFT4("CQ JK1IFA PM95", {
+  sampleRate: 12000,
+  baseFrequency: 1000,
+});
+
+// Decode FT4
+const book = new HashCallBook();
+const decoded = decodeFT4(samples, {
+  sampleRate: 12000,
+  freqLow: 200,
+  freqHigh: 3000,
+  depth: 2,
+  hashCallBook: book,
+});
+```
+
 ### Decode Options
 
 | Option | Default | Description |
@@ -99,12 +121,8 @@ for (const d of decoded) {
 | `freqHigh` | 3000 | Upper frequency bound (Hz) |
 | `syncMin` | 1.2 | Minimum sync threshold |
 | `depth` | 2 | Decoding depth: 1=fast BP only, 2=BP+OSD, 3=deep |
-| `maxCandidates` | 300 | Maximum candidates to process |
+| `maxCandidates` | 300 (FT8) / 100 (FT4) | Maximum candidates to process |
 | `hashCallBook` | — | `HashCallBook` instance for resolving hashed callsigns |
-
-## ToDo
-
-- [ ] FT4 Support
 
 ## Build
 

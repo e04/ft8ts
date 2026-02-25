@@ -1,6 +1,7 @@
-import { gHex, graymap, icos7 } from "../util/constants.js";
+import { gHex } from "../util/constants.js";
 import { pack77 } from "../util/pack_jt77.js";
 import { generateFT8Waveform, type WaveformOptions } from "../util/waveform.js";
+import { COSTAS, GRAY_MAP } from "./constants.js";
 
 function generateLdpcGMatrix(): number[][] {
 	const K = 91;
@@ -59,16 +60,16 @@ export function encode174_91(msg77: number[]): number[] {
 export function getTones(codeword: number[]): number[] {
 	const tones = new Array(79).fill(0);
 
-	for (let i = 0; i < 7; i++) tones[i] = icos7[i]!;
-	for (let i = 0; i < 7; i++) tones[36 + i] = icos7[i]!;
-	for (let i = 0; i < 7; i++) tones[72 + i] = icos7[i]!;
+	for (let i = 0; i < 7; i++) tones[i] = COSTAS[i]!;
+	for (let i = 0; i < 7; i++) tones[36 + i] = COSTAS[i]!;
+	for (let i = 0; i < 7; i++) tones[72 + i] = COSTAS[i]!;
 
 	let k = 7;
 	for (let j = 1; j <= 58; j++) {
 		const i = j * 3 - 3; // codeword is 0-indexed in JS, but the loop was j=1 to 58
 		if (j === 30) k += 7;
 		const indx = codeword[i]! * 4 + codeword[i + 1]! * 2 + codeword[i + 2]!;
-		tones[k] = graymap[indx]!;
+		tones[k] = GRAY_MAP[indx]!;
 		k++;
 	}
 	return tones;

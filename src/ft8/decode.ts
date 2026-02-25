@@ -1,20 +1,9 @@
-import {
-	graymap,
-	icos7,
-	N_LDPC,
-	NDOWN,
-	NFFT1,
-	NHSYM,
-	NMAX,
-	NN,
-	NSPS,
-	NSTEP,
-	SAMPLE_RATE,
-} from "../util/constants.js";
+import { N_LDPC, SAMPLE_RATE } from "../util/constants.js";
 import { decode174_91 } from "../util/decode174_91.js";
 import { fftComplex, nextPow2 } from "../util/fft.js";
 import type { HashCallBook } from "../util/hashcall.js";
 import { unpack77 } from "../util/unpack_jt77.js";
+import { COSTAS, GRAY_MAP, NDOWN, NFFT1, NHSYM, NMAX, NN, NSPS, NSTEP } from "./constants.js";
 
 export interface DecodedMessage {
 	freq: number;
@@ -174,7 +163,7 @@ function sync8(
 
 			for (let n = 0; n < 7; n++) {
 				const m = jj + jstrt + nssy * n;
-				const iCostas = i + nfos * icos7[n]!;
+				const iCostas = i + nfos * COSTAS[n]!;
 
 				if (m >= 0 && m < NHSYM && iCostas < halfSize) {
 					ta += s[iCostas * NHSYM + m]!;
@@ -440,7 +429,7 @@ function ft8b(
 					maxTone = t;
 				}
 			}
-			if (maxTone === icos7[k]) nsync++;
+			if (maxTone === COSTAS[k]) nsync++;
 		}
 	}
 	if (nsync <= 6) return null;
@@ -466,22 +455,22 @@ function ft8b(
 					const i2 = Math.floor((i & 63) / 8);
 					const i3 = i & 7;
 					if (nsym === 1) {
-						const re = csRe[graymap[i3]! * NN + ks - 1]!;
-						const im = csIm[graymap[i3]! * NN + ks - 1]!;
+						const re = csRe[GRAY_MAP[i3]! * NN + ks - 1]!;
+						const im = csIm[GRAY_MAP[i3]! * NN + ks - 1]!;
 						s2[i] = Math.sqrt(re * re + im * im);
 					} else if (nsym === 2) {
-						const sRe = csRe[graymap[i2]! * NN + ks - 1]! + csRe[graymap[i3]! * NN + ks]!;
-						const sIm = csIm[graymap[i2]! * NN + ks - 1]! + csIm[graymap[i3]! * NN + ks]!;
+						const sRe = csRe[GRAY_MAP[i2]! * NN + ks - 1]! + csRe[GRAY_MAP[i3]! * NN + ks]!;
+						const sIm = csIm[GRAY_MAP[i2]! * NN + ks - 1]! + csIm[GRAY_MAP[i3]! * NN + ks]!;
 						s2[i] = Math.sqrt(sRe * sRe + sIm * sIm);
 					} else {
 						const sRe =
-							csRe[graymap[i1]! * NN + ks - 1]! +
-							csRe[graymap[i2]! * NN + ks]! +
-							csRe[graymap[i3]! * NN + ks + 1]!;
+							csRe[GRAY_MAP[i1]! * NN + ks - 1]! +
+							csRe[GRAY_MAP[i2]! * NN + ks]! +
+							csRe[GRAY_MAP[i3]! * NN + ks + 1]!;
 						const sIm =
-							csIm[graymap[i1]! * NN + ks - 1]! +
-							csIm[graymap[i2]! * NN + ks]! +
-							csIm[graymap[i3]! * NN + ks + 1]!;
+							csIm[GRAY_MAP[i1]! * NN + ks - 1]! +
+							csIm[GRAY_MAP[i2]! * NN + ks]! +
+							csIm[GRAY_MAP[i3]! * NN + ks + 1]!;
 						s2[i] = Math.sqrt(sRe * sRe + sIm * sIm);
 					}
 				}
@@ -577,15 +566,15 @@ function ft8b(
 
 function getTones(cw: number[]): number[] {
 	const tones = new Array(79).fill(0) as number[];
-	for (let i = 0; i < 7; i++) tones[i] = icos7[i]!;
-	for (let i = 0; i < 7; i++) tones[36 + i] = icos7[i]!;
-	for (let i = 0; i < 7; i++) tones[72 + i] = icos7[i]!;
+	for (let i = 0; i < 7; i++) tones[i] = COSTAS[i]!;
+	for (let i = 0; i < 7; i++) tones[36 + i] = COSTAS[i]!;
+	for (let i = 0; i < 7; i++) tones[72 + i] = COSTAS[i]!;
 	let k = 7;
 	for (let j = 1; j <= 58; j++) {
 		const i = (j - 1) * 3;
 		if (j === 30) k += 7;
 		const indx = cw[i]! * 4 + cw[i + 1]! * 2 + cw[i + 2]!;
-		tones[k] = graymap[indx]!;
+		tones[k] = GRAY_MAP[indx]!;
 		k++;
 	}
 	return tones;
@@ -691,7 +680,7 @@ function sync8d(
 	const csyncIm = new Float64Array(7 * 32);
 	for (let i = 0; i < 7; i++) {
 		let phi = 0;
-		const dphi = (twopi * icos7[i]!) / 32;
+		const dphi = (twopi * COSTAS[i]!) / 32;
 		for (let j = 0; j < 32; j++) {
 			csyncRe[i * 32 + j] = Math.cos(phi);
 			csyncIm[i * 32 + j] = Math.sin(phi);
