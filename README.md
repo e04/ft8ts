@@ -2,13 +2,13 @@
 
 [![Tests](https://github.com/e04/ft8ts/actions/workflows/test.yml/badge.svg)](https://github.com/e04/ft8ts/actions/workflows/test.yml)
 
-FT8 and FT4 encoder and decoder in pure TypeScript. A port of the Fortran implementation from [WSJT-X](https://wsjt.sourceforge.io/wsjtx.html) v2.7.0.
+FT8/FT4 encoder and decoder in pure TypeScript. A port of the Fortran implementation from [WSJT-X](https://wsjt.sourceforge.io/wsjtx.html) v2.7.0.
 
 ## Overview
 
-FT8 and FT4 are digital amateur radio modes designed for weak-signal communication, developed by Joe Taylor (K1JT) and Steve Franke (K9AN).
+FT8/FT4 are digital amateur radio modes designed for weak-signal communication, developed by Joe Taylor (K1JT) and Steve Franke (K9AN).
 
-This library provides pure TypeScript implementations of both encoding and decoding for FT8 and FT4, suitable for use in Node.js or the browser.
+This library provides pure TypeScript implementations of both encoding and decoding for FT8/FT4, suitable for use in Node.js or the browser.
 
 ## Demo
 
