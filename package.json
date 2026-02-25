@@ -15,6 +15,9 @@
 	"main": "dist/ft8ts.cjs",
 	"module": "dist/ft8ts.mjs",
 	"types": "./dist/ft8ts.d.ts",
+	"bin": {
+		"ft8ts": "./dist/cli.js"
+	},
 	"exports": {
 		".": {
 			"types": "./dist/ft8ts.d.ts",

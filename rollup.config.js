@@ -4,6 +4,25 @@ import dts from "rollup-plugin-dts";
 
 export default [
 	{
+		input: "src/cli.ts",
+		output: {
+			file: "dist/cli.js",
+			format: "es",
+			sourcemap: true,
+			banner: "#!/usr/bin/env node",
+		},
+		plugins: [
+			resolve(),
+			typescript({
+				tsconfig: "./tsconfig.json",
+				compilerOptions: {
+					declaration: false,
+					declarationMap: false,
+				},
+			}),
+		],
+	},
+	{
 		input: "src/index.ts",
 		output: [
 			{
