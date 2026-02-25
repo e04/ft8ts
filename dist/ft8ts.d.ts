@@ -46,6 +46,47 @@ declare class HashCallBook {
     clear(): void;
 }
 
+interface DecodedMessage$1 {
+    freq: number;
+    dt: number;
+    snr: number;
+    msg: string;
+    sync: number;
+}
+interface DecodeOptions$1 {
+    /** Sample rate (Hz), default 12000 */
+    sampleRate?: number;
+    /** Lower frequency bound (Hz), default 200 */
+    freqLow?: number;
+    /** Upper frequency bound (Hz), default 3000 */
+    freqHigh?: number;
+    /** Minimum sync threshold, default 1.2 */
+    syncMin?: number;
+    /** Decoding depth: 1=fast BP only, 2=BP+OSD, 3=deep */
+    depth?: number;
+    /** Maximum candidates to process */
+    maxCandidates?: number;
+    /**
+     * Hash call book for resolving hashed callsigns.
+     * Reuse the same instance across frames to accumulate callsign knowledge.
+     */
+    hashCallBook?: HashCallBook;
+}
+/**
+ * Decode all FT4 signals in a buffer.
+ * Input: mono audio samples at `sampleRate` Hz, duration ~6s.
+ */
+declare function decode$1(samples: Float32Array | Float64Array, options?: DecodeOptions$1): DecodedMessage$1[];
+
+interface WaveformOptions {
+    sampleRate?: number;
+    samplesPerSymbol?: number;
+    bt?: number;
+    baseFrequency?: number;
+}
+
+declare function encode$1(msg: string, options?: WaveformOptions): Float32Array;
+
 interface DecodedMessage {
     freq: number;
     dt: number;
@@ -81,14 +122,7 @@ interface DecodeOptions {
  */
 declare function decode(samples: Float32Array | Float64Array, options?: DecodeOptions): DecodedMessage[];
 
-interface WaveformOptions {
-    sampleRate?: number;
-    samplesPerSymbol?: number;
-    bt?: number;
-    baseFrequency?: number;
-}
-
 declare function encode(msg: string, options?: WaveformOptions): Float32Array;
 
-export { HashCallBook, decode as decodeFT8, encode as encodeFT8 };
-export type { DecodeOptions, DecodedMessage };
+export { HashCallBook, decode$1 as decodeFT4, decode as decodeFT8, encode$1 as encodeFT4, encode as encodeFT8 };
+export type { DecodeOptions$1 as DecodeFT4Options, DecodeOptions, DecodedMessage$1 as DecodedFT4Message, DecodedMessage };

@@ -1,18 +1,11 @@
 'use strict';
 
+/** Shared constants used by FT8, FT4, pack77, etc. */
 const SAMPLE_RATE = 12_000;
-const NSPS = 1920;
-const NFFT1 = 2 * NSPS; // 3840
-const NSTEP = NSPS / 4; // 480
-const NMAX = 15 * SAMPLE_RATE; // 180000
-const NHSYM = Math.floor(NMAX / NSTEP) - 3; // 372
-const NDOWN = 60;
-const NN = 79;
+/** LDPC(174,91) code (shared by FT8 and FT4). */
 const KK = 91;
 const N_LDPC = 174;
 const M_LDPC = N_LDPC - KK; // 83
-const icos7 = [3, 1, 4, 0, 6, 5, 2];
-const graymap = [0, 1, 3, 2, 5, 6, 4, 7];
 const gHex = [
     "8329ce11bf31eaf509f27fc",
     "761c264e25c259335493132",
@@ -921,607 +914,812 @@ function unpack77(bits77, book) {
     return { msg: "", success: false };
 }
 
+/** FT4-specific constants (lib/ft4/ft4_params.f90). */
+const COSTAS_A = [0, 1, 3, 2];
+const COSTAS_B = [1, 0, 2, 3];
+const COSTAS_C = [2, 3, 1, 0];
+const COSTAS_D = [3, 2, 0, 1];
+const GRAYMAP = [0, 1, 3, 2];
+// Message scrambling vector (rvec) from WSJT-X.
+const RVEC = [
+    0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 1,
+    0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0,
+    1, 1, 1, 1, 1, 0, 0, 0, 1, 0, 1,
+];
+const NSPS$1 = 576;
+const NFFT1$1 = 4 * NSPS$1; // 2304
+const NH1 = NFFT1$1 / 2; // 1152
+const NSTEP$1 = NSPS$1;
+const NMAX$1 = 21 * 3456; // 72576
+const NHSYM$1 = Math.floor((NMAX$1 - NFFT1$1) / NSTEP$1); // 122
+const NDOWN$1 = 18;
+const ND = 87;
+const NS = 16;
+const NN$1 = NS + ND; // 103
+const NFFT2 = NMAX$1 / NDOWN$1; // 4032
+const NSS = NSPS$1 / NDOWN$1; // 32
+const FS2 = SAMPLE_RATE / NDOWN$1; // 666.67 Hz
+const MAX_FREQ = 4910;
+const SYNC_PASS_MIN = 1.2;
+const TWO_PI$1 = 2 * Math.PI;
+const HARD_SYNC_PATTERNS = [
+    { offset: 0, bits: [0, 0, 0, 1, 1, 0, 1, 1] },
+    { offset: 66, bits: [0, 1, 0, 0, 1, 1, 1, 0] },
+    { offset: 132, bits: [1, 1, 1, 0, 0, 1, 0, 0] },
+    { offset: 198, bits: [1, 0, 1, 1, 0, 0, 0, 1] },
+];
+
+function xorWithScrambler(bits77) {
+    const out = new Array(77);
+    for (let i = 0; i < 77; i++) {
+        out[i] = ((bits77[i] ?? 0) + RVEC[i]) & 1;
+    }
+    return out;
+}
+
 /**
- * Decode all FT8 signals in an audio buffer.
- * Input: mono audio samples at `sampleRate` Hz, duration ~15s.
+ * Decode all FT4 signals in a buffer.
+ * Input: mono audio samples at `sampleRate` Hz, duration ~6s.
  */
-function decode(samples, options = {}) {
+function decode$1(samples, options = {}) {
     const sampleRate = options.sampleRate ?? SAMPLE_RATE;
-    const nfa = options.freqLow ?? 200;
-    const nfb = options.freqHigh ?? 3000;
-    const syncmin = options.syncMin ?? 1.2;
+    const freqLow = options.freqLow ?? 200;
+    const freqHigh = options.freqHigh ?? 3000;
+    const syncMin = options.syncMin ?? 1.2;
     const depth = options.depth ?? 2;
-    const maxCandidates = options.maxCandidates ?? 300;
+    const maxCandidates = options.maxCandidates ?? 100;
     const book = options.hashCallBook;
-    // Resample to 12000 Hz if needed
-    let dd;
-    if (sampleRate === SAMPLE_RATE) {
-        dd = new Float64Array(NMAX);
-        const len = Math.min(samples.length, NMAX);
-        for (let i = 0; i < len; i++)
-            dd[i] = samples[i];
-    }
-    else {
-        dd = resample(samples, sampleRate, SAMPLE_RATE, NMAX);
-    }
-    // Compute huge FFT for downsampling caching
-    const NFFT1_LONG = 192000;
-    const cxRe = new Float64Array(NFFT1_LONG);
-    const cxIm = new Float64Array(NFFT1_LONG);
-    for (let i = 0; i < NMAX; i++) {
+    const dd = sampleRate === SAMPLE_RATE
+        ? copyIntoFt4Buffer(samples)
+        : resample$1(samples, sampleRate, SAMPLE_RATE, NMAX$1);
+    const cxRe = new Float64Array(NMAX$1);
+    const cxIm = new Float64Array(NMAX$1);
+    for (let i = 0; i < NMAX$1; i++) {
         cxRe[i] = dd[i] ?? 0;
     }
     fftComplex(cxRe, cxIm, false);
-    // Compute spectrogram and find sync candidates
-    const { candidates, sbase } = sync8(dd, nfa, nfb, syncmin, maxCandidates);
+    const candidates = getCandidates4(dd, freqLow, freqHigh, syncMin, maxCandidates);
+    if (candidates.length === 0) {
+        return [];
+    }
+    const downsampleCtx = createDownsampleContext();
+    const tweakedSyncTemplates = createTweakedSyncTemplates();
     const decoded = [];
     const seenMessages = new Set();
-    for (const cand of candidates) {
-        const result = ft8b(dd, cxRe, cxIm, cand.freq, cand.dt, sbase, depth, book);
-        if (!result)
+    const apmask = new Int8Array(174);
+    for (const candidate of candidates) {
+        const one = decodeCandidate(candidate, cxRe, cxIm, downsampleCtx, tweakedSyncTemplates, depth, book, apmask);
+        if (!one) {
             continue;
-        if (seenMessages.has(result.msg))
+        }
+        if (seenMessages.has(one.msg)) {
             continue;
-        seenMessages.add(result.msg);
-        decoded.push({
-            freq: result.freq,
-            dt: result.dt - 0.5,
-            snr: result.snr,
-            msg: result.msg,
-            sync: cand.sync,
-        });
+        }
+        seenMessages.add(one.msg);
+        decoded.push(one);
     }
     return decoded;
 }
-function sync8(dd, nfa, nfb, syncmin, maxcand) {
-    const JZ = 62;
-    // Fortran uses NFFT1=3840 for the spectrogram FFT; we need a power of 2
-    const fftSize = nextPow2(NFFT1); // 4096
-    const halfSize = fftSize / 2; // 2048
-    const tstep = NSTEP / SAMPLE_RATE;
-    const df = SAMPLE_RATE / fftSize;
-    const fac = 1.0 / 300.0;
-    // Compute symbol spectra, stepping by NSTEP
-    const s = new Float64Array(halfSize * NHSYM);
-    const savg = new Float64Array(halfSize);
-    const xRe = new Float64Array(fftSize);
-    const xIm = new Float64Array(fftSize);
-    for (let j = 0; j < NHSYM; j++) {
-        const ia = j * NSTEP;
-        xRe.fill(0);
-        xIm.fill(0);
-        for (let i = 0; i < NSPS && ia + i < dd.length; i++) {
-            xRe[i] = fac * dd[ia + i];
-        }
-        fftComplex(xRe, xIm, false);
-        for (let i = 0; i < halfSize; i++) {
-            const power = xRe[i] * xRe[i] + xIm[i] * xIm[i];
-            s[i * NHSYM + j] = power;
-            savg[i] = (savg[i] ?? 0) + power;
-        }
-    }
-    // Compute baseline
-    const sbase = computeBaseline(savg, nfa, nfb, df, halfSize);
-    const ia = Math.max(1, Math.round(nfa / df));
-    const ib = Math.min(halfSize - 14, Math.round(nfb / df));
-    const nssy = Math.floor(NSPS / NSTEP);
-    const nfos = Math.round(SAMPLE_RATE / NSPS / df); // ~2 bins per tone spacing
-    const jstrt = Math.round(0.5 / tstep);
-    // 2D sync correlation
-    const sync2d = new Float64Array((ib - ia + 1) * (2 * JZ + 1));
-    const width = 2 * JZ + 1;
-    for (let i = ia; i <= ib; i++) {
-        for (let jj = -JZ; jj <= JZ; jj++) {
-            let ta = 0, tb = 0, tc = 0;
-            let t0a = 0, t0b = 0, t0c = 0;
-            for (let n = 0; n < 7; n++) {
-                const m = jj + jstrt + nssy * n;
-                const iCostas = i + nfos * icos7[n];
-                if (m >= 0 && m < NHSYM && iCostas < halfSize) {
-                    ta += s[iCostas * NHSYM + m];
-                    for (let tone = 0; tone <= 6; tone++) {
-                        const idx = i + nfos * tone;
-                        if (idx < halfSize)
-                            t0a += s[idx * NHSYM + m];
-                    }
+function decodeCandidate(candidate, cxRe, cxIm, downsampleCtx, tweakedSyncTemplates, depth, book, apmask) {
+    const cd2 = ft4Downsample(cxRe, cxIm, candidate.freq, downsampleCtx);
+    normalizeComplexPower(cd2.re, cd2.im, NMAX$1 / NDOWN$1);
+    for (let segment = 1; segment <= 3; segment++) {
+        let ibest = -1;
+        let idfbest = 0;
+        let smax = -99;
+        for (let isync = 1; isync <= 2; isync++) {
+            let idfmin;
+            let idfmax;
+            let idfstp;
+            let ibmin;
+            let ibmax;
+            let ibstp;
+            if (isync === 1) {
+                idfmin = -12;
+                idfmax = 12;
+                idfstp = 3;
+                ibmin = -344;
+                ibmax = 1012;
+                if (segment === 1) {
+                    ibmin = 108;
+                    ibmax = 560;
                 }
-                const m36 = m + nssy * 36;
-                if (m36 >= 0 && m36 < NHSYM && iCostas < halfSize) {
-                    tb += s[iCostas * NHSYM + m36];
-                    for (let tone = 0; tone <= 6; tone++) {
-                        const idx = i + nfos * tone;
-                        if (idx < halfSize)
-                            t0b += s[idx * NHSYM + m36];
-                    }
-                }
-                const m72 = m + nssy * 72;
-                if (m72 >= 0 && m72 < NHSYM && iCostas < halfSize) {
-                    tc += s[iCostas * NHSYM + m72];
-                    for (let tone = 0; tone <= 6; tone++) {
-                        const idx = i + nfos * tone;
-                        if (idx < halfSize)
-                            t0c += s[idx * NHSYM + m72];
-                    }
-                }
-            }
-            const t = ta + tb + tc;
-            const t0total = t0a + t0b + t0c;
-            const t0 = (t0total - t) / 6.0;
-            const syncVal = t0 > 0 ? t / t0 : 0;
-            const tbc = tb + tc;
-            const t0bc = t0b + t0c;
-            const t0bc2 = (t0bc - tbc) / 6.0;
-            const syncBc = t0bc2 > 0 ? tbc / t0bc2 : 0;
-            sync2d[(i - ia) * width + (jj + JZ)] = Math.max(syncVal, syncBc);
-        }
-    }
-    // Find peaks
-    const candidates0 = [];
-    const mlag = 10;
-    for (let i = ia; i <= ib; i++) {
-        let bestSync = -1;
-        let bestJ = 0;
-        for (let j = -mlag; j <= mlag; j++) {
-            const v = sync2d[(i - ia) * width + (j + JZ)];
-            if (v > bestSync) {
-                bestSync = v;
-                bestJ = j;
-            }
-        }
-        // Also check wider range
-        let bestSync2 = -1;
-        let bestJ2 = 0;
-        for (let j = -JZ; j <= JZ; j++) {
-            const v = sync2d[(i - ia) * width + (j + JZ)];
-            if (v > bestSync2) {
-                bestSync2 = v;
-                bestJ2 = j;
-            }
-        }
-        if (bestSync >= syncmin) {
-            candidates0.push({
-                freq: i * df,
-                dt: (bestJ - 0.5) * tstep,
-                sync: bestSync,
-            });
-        }
-        if (Math.abs(bestJ2 - bestJ) > 0 && bestSync2 >= syncmin) {
-            candidates0.push({
-                freq: i * df,
-                dt: (bestJ2 - 0.5) * tstep,
-                sync: bestSync2,
-            });
-        }
-    }
-    // Compute baseline normalization for sync values
-    const syncValues = candidates0.map((c) => c.sync);
-    syncValues.sort((a, b) => a - b);
-    const pctileIdx = Math.max(0, Math.round(0.4 * syncValues.length) - 1);
-    const base = syncValues[pctileIdx] ?? 1;
-    if (base > 0) {
-        for (const c of candidates0)
-            c.sync /= base;
-    }
-    // Remove near-duplicate candidates
-    for (let i = 0; i < candidates0.length; i++) {
-        for (let j = 0; j < i; j++) {
-            const fdiff = Math.abs(candidates0[i].freq - candidates0[j].freq);
-            const tdiff = Math.abs(candidates0[i].dt - candidates0[j].dt);
-            if (fdiff < 4.0 && tdiff < 0.04) {
-                if (candidates0[i].sync >= candidates0[j].sync) {
-                    candidates0[j].sync = 0;
+                else if (segment === 2) {
+                    ibmin = 560;
+                    ibmax = 1012;
                 }
                 else {
-                    candidates0[i].sync = 0;
+                    ibmin = -344;
+                    ibmax = 108;
+                }
+                ibstp = 4;
+            }
+            else {
+                idfmin = idfbest - 4;
+                idfmax = idfbest + 4;
+                idfstp = 1;
+                ibmin = ibest - 5;
+                ibmax = ibest + 5;
+                ibstp = 1;
+            }
+            for (let idf = idfmin; idf <= idfmax; idf += idfstp) {
+                const templates = tweakedSyncTemplates.get(idf);
+                if (!templates) {
+                    continue;
+                }
+                for (let istart = ibmin; istart <= ibmax; istart += ibstp) {
+                    const sync = sync4d(cd2.re, cd2.im, istart, templates);
+                    if (sync > smax) {
+                        smax = sync;
+                        ibest = istart;
+                        idfbest = idf;
+                    }
                 }
             }
         }
-    }
-    // Sort by sync descending, take top maxcand
-    const filtered = candidates0.filter((c) => c.sync >= syncmin);
-    filtered.sort((a, b) => b.sync - a.sync);
-    return { candidates: filtered.slice(0, maxcand), sbase };
-}
-function computeBaseline(savg, nfa, nfb, df, nh1) {
-    const sbase = new Float64Array(nh1);
-    const ia = Math.max(1, Math.round(nfa / df));
-    const ib = Math.min(nh1 - 1, Math.round(nfb / df));
-    // Smooth the spectrum to get baseline
-    const window = 50; // bins
-    for (let i = 0; i < nh1; i++) {
-        let sum = 0;
-        let count = 0;
-        const lo = Math.max(ia, i - window);
-        const hi = Math.min(ib, i + window);
-        for (let j = lo; j <= hi; j++) {
-            sum += savg[j];
-            count++;
+        if (smax < SYNC_PASS_MIN) {
+            continue;
         }
-        sbase[i] = count > 0 ? 10 * Math.log10(Math.max(1e-30, sum / count)) : 0;
+        const f1 = candidate.freq + idfbest;
+        if (f1 <= 10 || f1 >= 4990) {
+            continue;
+        }
+        const cb = ft4Downsample(cxRe, cxIm, f1, downsampleCtx);
+        normalizeComplexPower(cb.re, cb.im, NSS * NN$1);
+        const frame = extractFrame(cb.re, cb.im, ibest);
+        const metrics = getFt4Bitmetrics(frame.re, frame.im);
+        if (metrics.badsync) {
+            continue;
+        }
+        if (!passesHardSyncQuality(metrics.bitmetrics1)) {
+            continue;
+        }
+        const [llra, llrb, llrc] = buildLlrs(metrics.bitmetrics1, metrics.bitmetrics2, metrics.bitmetrics3);
+        const maxosd = depth >= 3 ? 2 : depth >= 2 ? 0 : -1;
+        const scalefac = 2.83;
+        for (const src of [llra, llrb, llrc]) {
+            const llr = new Float64Array(174);
+            for (let i = 0; i < 174; i++) {
+                llr[i] = scalefac * src[i];
+            }
+            const result = decode174_91(llr, apmask, maxosd);
+            if (!result) {
+                continue;
+            }
+            const message77Scrambled = result.message91.slice(0, 77);
+            if (!hasNonZeroBit(message77Scrambled)) {
+                continue;
+            }
+            const message77 = xorWithScrambler(message77Scrambled);
+            const { msg, success } = unpack77(message77, book);
+            if (!success || msg.trim().length === 0) {
+                continue;
+            }
+            return {
+                freq: f1,
+                dt: ibest / FS2 - 0.5,
+                snr: toFt4Snr(candidate.sync - 1.0),
+                msg,
+                sync: smax,
+            };
+        }
+    }
+    return null;
+}
+function copyIntoFt4Buffer(samples) {
+    const out = new Float64Array(NMAX$1);
+    const len = Math.min(samples.length, NMAX$1);
+    for (let i = 0; i < len; i++) {
+        out[i] = samples[i];
+    }
+    return out;
+}
+function getCandidates4(dd, freqLow, freqHigh, syncMin, maxCandidates) {
+    const df = SAMPLE_RATE / NFFT1$1;
+    const fac = 1 / 300;
+    const window = makeNuttallWindow(NFFT1$1);
+    const savg = new Float64Array(NH1);
+    const s = new Float64Array(NH1 * NHSYM$1);
+    const savsm = new Float64Array(NH1);
+    const xRe = new Float64Array(NFFT1$1);
+    const xIm = new Float64Array(NFFT1$1);
+    for (let j = 0; j < NHSYM$1; j++) {
+        const ia = j * NSPS$1;
+        const ib = ia + NFFT1$1;
+        if (ib > NMAX$1) {
+            break;
+        }
+        xIm.fill(0);
+        for (let i = 0; i < NFFT1$1; i++) {
+            xRe[i] = fac * dd[ia + i] * window[i];
+        }
+        fftComplex(xRe, xIm, false);
+        for (let bin = 1; bin <= NH1; bin++) {
+            const idx = bin - 1;
+            const re = xRe[bin] ?? 0;
+            const im = xIm[bin] ?? 0;
+            const power = re * re + im * im;
+            s[idx * NHSYM$1 + j] = power;
+            savg[idx] = (savg[idx] ?? 0) + power;
+        }
+    }
+    for (let i = 0; i < NH1; i++) {
+        savg[i] = (savg[i] ?? 0) / NHSYM$1;
+    }
+    for (let i = 7; i < NH1 - 7; i++) {
+        let sum = 0;
+        for (let j = i - 7; j <= i + 7; j++) {
+            sum += savg[j];
+        }
+        savsm[i] = sum / 15;
+    }
+    let nfa = Math.round(freqLow / df);
+    if (nfa < Math.round(200 / df)) {
+        nfa = Math.round(200 / df);
+    }
+    let nfb = Math.round(freqHigh / df);
+    if (nfb > Math.round(MAX_FREQ / df)) {
+        nfb = Math.round(MAX_FREQ / df);
+    }
+    const sbase = ft4Baseline(savg, nfa, nfb, df);
+    for (let bin = nfa; bin <= nfb; bin++) {
+        if ((sbase[bin - 1] ?? 0) <= 0) {
+            return [];
+        }
+    }
+    for (let bin = nfa; bin <= nfb; bin++) {
+        const idx = bin - 1;
+        savsm[idx] = (savsm[idx] ?? 0) / sbase[idx];
+    }
+    const fOffset = (-1.5 * SAMPLE_RATE) / NSPS$1;
+    const candidates = [];
+    for (let i = nfa + 1; i <= nfb - 1; i++) {
+        const left = savsm[i - 2] ?? 0;
+        const center = savsm[i - 1] ?? 0;
+        const right = savsm[i] ?? 0;
+        if (center >= left && center >= right && center >= syncMin) {
+            const den = left - 2 * center + right;
+            const del = den !== 0 ? (0.5 * (left - right)) / den : 0;
+            const fpeak = (i + del) * df + fOffset;
+            if (fpeak < 200 || fpeak > MAX_FREQ) {
+                continue;
+            }
+            const speak = center - 0.25 * (left - right) * del;
+            candidates.push({ freq: fpeak, sync: speak });
+        }
+    }
+    candidates.sort((a, b) => b.sync - a.sync);
+    return candidates.slice(0, maxCandidates);
+}
+function makeNuttallWindow(n) {
+    const out = new Float64Array(n);
+    const a0 = 0.3635819;
+    const a1 = -0.4891775;
+    const a2 = 0.1365995;
+    const a3 = -0.0106411;
+    for (let i = 0; i < n; i++) {
+        out[i] =
+            a0 +
+                a1 * Math.cos((2 * Math.PI * i) / n) +
+                a2 * Math.cos((4 * Math.PI * i) / n) +
+                a3 * Math.cos((6 * Math.PI * i) / n);
+    }
+    return out;
+}
+function ft4Baseline(savg, nfa, nfb, df) {
+    const sbase = new Float64Array(NH1);
+    sbase.fill(1);
+    const ia = Math.max(Math.round(200 / df), nfa);
+    const ib = Math.min(NH1, nfb);
+    if (ib <= ia) {
+        return sbase;
+    }
+    const sDb = new Float64Array(NH1);
+    for (let i = ia; i <= ib; i++) {
+        sDb[i - 1] = 10 * Math.log10(Math.max(1e-30, savg[i - 1]));
+    }
+    const nseg = 10;
+    const npct = 10;
+    const nlen = Math.max(1, Math.trunc((ib - ia + 1) / nseg));
+    const i0 = Math.trunc((ib - ia + 1) / 2);
+    const x = [];
+    const y = [];
+    for (let seg = 0; seg < nseg; seg++) {
+        const ja = ia + seg * nlen;
+        if (ja > ib) {
+            break;
+        }
+        const jb = Math.min(ib, ja + nlen - 1);
+        const vals = [];
+        for (let i = ja; i <= jb; i++) {
+            vals.push(sDb[i - 1]);
+        }
+        const base = percentile(vals, npct);
+        for (let i = ja; i <= jb; i++) {
+            const v = sDb[i - 1];
+            if (v <= base) {
+                x.push(i - i0);
+                y.push(v);
+            }
+        }
+    }
+    const coeff = x.length >= 5 ? polyfitLeastSquares(x, y, 4) : null;
+    if (coeff) {
+        for (let i = ia; i <= ib; i++) {
+            const t = i - i0;
+            const db = coeff[0] + t * (coeff[1] + t * (coeff[2] + t * (coeff[3] + t * coeff[4]))) + 0.65;
+            sbase[i - 1] = 10 ** (db / 10);
+        }
+    }
+    else {
+        const halfWindow = 25;
+        for (let i = ia; i <= ib; i++) {
+            const lo = Math.max(ia, i - halfWindow);
+            const hi = Math.min(ib, i + halfWindow);
+            let sum = 0;
+            let count = 0;
+            for (let j = lo; j <= hi; j++) {
+                sum += savg[j - 1];
+                count++;
+            }
+            sbase[i - 1] = count > 0 ? sum / count : 1;
+        }
     }
     return sbase;
 }
-function ft8b(_dd0, cxRe, cxIm, f1, xdt, _sbase, depth, book) {
-    const NFFT2 = 3200;
-    const NP2 = 2812;
-    const fs2 = SAMPLE_RATE / NDOWN;
-    const dt2 = 1.0 / fs2;
-    const twopi = 2 * Math.PI;
-    // Downsample: mix to baseband and filter
-    const cd0Re = new Float64Array(NFFT2);
-    const cd0Im = new Float64Array(NFFT2);
-    ft8Downsample(cxRe, cxIm, f1, cd0Re, cd0Im);
-    // Find best time offset
-    const i0 = Math.round((xdt + 0.5) * fs2);
-    let smax = 0;
-    let ibest = i0;
-    for (let idt = i0 - 10; idt <= i0 + 10; idt++) {
-        const sync = sync8d(cd0Re, cd0Im, idt, null, null, false);
-        if (sync > smax) {
-            smax = sync;
-            ibest = idt;
-        }
+function percentile(values, pct) {
+    if (values.length === 0) {
+        return 0;
     }
-    // Fine frequency search
-    smax = 0;
-    let delfbest = 0;
-    for (let ifr = -5; ifr <= 5; ifr++) {
-        const delf = ifr * 0.5;
-        const dphi = twopi * delf * dt2;
-        const twkRe = new Float64Array(32);
-        const twkIm = new Float64Array(32);
-        let phi = 0;
-        for (let i = 0; i < 32; i++) {
-            twkRe[i] = Math.cos(phi);
-            twkIm[i] = Math.sin(phi);
-            phi = (phi + dphi) % twopi;
-        }
-        const sync = sync8d(cd0Re, cd0Im, ibest, twkRe, twkIm, true);
-        if (sync > smax) {
-            smax = sync;
-            delfbest = delf;
-        }
-    }
-    // Apply frequency correction and re-downsample
-    f1 += delfbest;
-    ft8Downsample(cxRe, cxIm, f1, cd0Re, cd0Im);
-    // Refine time offset
-    const ss = new Float64Array(9);
-    for (let idt = -4; idt <= 4; idt++) {
-        ss[idt + 4] = sync8d(cd0Re, cd0Im, ibest + idt, null, null, false);
-    }
-    let maxss = -1;
-    let maxIdx = 4;
-    for (let i = 0; i < 9; i++) {
-        if (ss[i] > maxss) {
-            maxss = ss[i];
-            maxIdx = i;
-        }
-    }
-    ibest = ibest + maxIdx - 4;
-    xdt = (ibest - 1) * dt2;
-    // Extract 8-tone soft symbols for each of NN=79 symbols
-    const s8 = new Float64Array(8 * NN);
-    const csRe = new Float64Array(8 * NN);
-    const csIm = new Float64Array(8 * NN);
-    const symbRe = new Float64Array(32);
-    const symbIm = new Float64Array(32);
-    for (let k = 0; k < NN; k++) {
-        const i1 = ibest + k * 32;
-        symbRe.fill(0);
-        symbIm.fill(0);
-        if (i1 >= 0 && i1 + 31 < NP2) {
-            for (let j = 0; j < 32; j++) {
-                symbRe[j] = cd0Re[i1 + j];
-                symbIm[j] = cd0Im[i1 + j];
-            }
-        }
-        fftComplex(symbRe, symbIm, false);
-        for (let tone = 0; tone < 8; tone++) {
-            const re = symbRe[tone] / 1000;
-            const im = symbIm[tone] / 1000;
-            csRe[tone * NN + k] = re;
-            csIm[tone * NN + k] = im;
-            s8[tone * NN + k] = Math.sqrt(re * re + im * im);
-        }
-    }
-    // Sync quality check
-    let nsync = 0;
-    for (let k = 0; k < 7; k++) {
-        for (const offset of [0, 36, 72]) {
-            let maxTone = 0;
-            let maxVal = -1;
-            for (let t = 0; t < 8; t++) {
-                const v = s8[t * NN + k + offset];
-                if (v > maxVal) {
-                    maxVal = v;
-                    maxTone = t;
-                }
-            }
-            if (maxTone === icos7[k])
-                nsync++;
-        }
-    }
-    if (nsync <= 6)
-        return null;
-    // Compute soft bit metrics for multiple nsym values (1, 2, 3)
-    // and a normalized version, matching the Fortran ft8b passes 1-4
-    const bmeta = new Float64Array(N_LDPC); // nsym=1
-    const bmetb = new Float64Array(N_LDPC); // nsym=2
-    const bmetc = new Float64Array(N_LDPC); // nsym=3
-    const bmetd = new Float64Array(N_LDPC); // nsym=1 normalized
-    for (let nsym = 1; nsym <= 3; nsym++) {
-        const nt = 1 << (3 * nsym); // 8, 64, 512
-        const ibmax = nsym === 1 ? 2 : nsym === 2 ? 5 : 8;
-        for (let ihalf = 1; ihalf <= 2; ihalf++) {
-            for (let k = 1; k <= 29; k += nsym) {
-                const ks = ihalf === 1 ? k + 7 : k + 43;
-                const s2 = new Float64Array(nt);
-                for (let i = 0; i < nt; i++) {
-                    const i1 = Math.floor(i / 64);
-                    const i2 = Math.floor((i & 63) / 8);
-                    const i3 = i & 7;
-                    if (nsym === 1) {
-                        const re = csRe[graymap[i3] * NN + ks - 1];
-                        const im = csIm[graymap[i3] * NN + ks - 1];
-                        s2[i] = Math.sqrt(re * re + im * im);
-                    }
-                    else if (nsym === 2) {
-                        const sRe = csRe[graymap[i2] * NN + ks - 1] + csRe[graymap[i3] * NN + ks];
-                        const sIm = csIm[graymap[i2] * NN + ks - 1] + csIm[graymap[i3] * NN + ks];
-                        s2[i] = Math.sqrt(sRe * sRe + sIm * sIm);
-                    }
-                    else {
-                        const sRe = csRe[graymap[i1] * NN + ks - 1] +
-                            csRe[graymap[i2] * NN + ks] +
-                            csRe[graymap[i3] * NN + ks + 1];
-                        const sIm = csIm[graymap[i1] * NN + ks - 1] +
-                            csIm[graymap[i2] * NN + ks] +
-                            csIm[graymap[i3] * NN + ks + 1];
-                        s2[i] = Math.sqrt(sRe * sRe + sIm * sIm);
-                    }
-                }
-                // Fortran: i32 = 1 + (k-1)*3 + (ihalf-1)*87  (1-based)
-                const i32 = 1 + (k - 1) * 3 + (ihalf - 1) * 87;
-                for (let ib = 0; ib <= ibmax; ib++) {
-                    // max of s2 where bit (ibmax-ib) of index is 1
-                    let max1 = -1e30, max0 = -1e30;
-                    for (let i = 0; i < nt; i++) {
-                        const bitSet = (i & (1 << (ibmax - ib))) !== 0;
-                        if (bitSet) {
-                            if (s2[i] > max1)
-                                max1 = s2[i];
-                        }
-                        else {
-                            if (s2[i] > max0)
-                                max0 = s2[i];
-                        }
-                    }
-                    const idx = i32 + ib - 1; // Convert to 0-based
-                    if (idx >= 0 && idx < N_LDPC) {
-                        const bm = max1 - max0;
-                        if (nsym === 1) {
-                            bmeta[idx] = bm;
-                            const den = Math.max(max1, max0);
-                            bmetd[idx] = den > 0 ? bm / den : 0;
-                        }
-                        else if (nsym === 2) {
-                            bmetb[idx] = bm;
-                        }
-                        else {
-                            bmetc[idx] = bm;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    normalizeBmet(bmeta);
-    normalizeBmet(bmetb);
-    normalizeBmet(bmetc);
-    normalizeBmet(bmetd);
-    const bmetrics = [bmeta, bmetb, bmetc, bmetd];
-    const scalefac = 2.83;
-    const maxosd = depth >= 3 ? 2 : depth >= 2 ? 0 : -1;
-    const apmask = new Int8Array(N_LDPC);
-    // Try 4 passes with different soft-symbol metrics (matching Fortran)
-    let result = null;
-    for (let ipass = 0; ipass < 4; ipass++) {
-        const llr = new Float64Array(N_LDPC);
-        for (let i = 0; i < N_LDPC; i++)
-            llr[i] = scalefac * bmetrics[ipass][i];
-        result = decode174_91(llr, apmask, maxosd);
-        if (result && result.nharderrors >= 0 && result.nharderrors <= 36)
-            break;
-        result = null;
-    }
-    if (!result || result.nharderrors < 0 || result.nharderrors > 36)
-        return null;
-    // Check for all-zero codeword
-    if (result.cw.every((b) => b === 0))
-        return null;
-    const message77 = result.message91.slice(0, 77);
-    // Validate message type
-    const n3v = (message77[71] << 2) | (message77[72] << 1) | message77[73];
-    const i3v = (message77[74] << 2) | (message77[75] << 1) | message77[76];
-    if (i3v > 5 || (i3v === 0 && n3v > 6))
-        return null;
-    if (i3v === 0 && n3v === 2)
-        return null;
-    // Unpack
-    const { msg, success } = unpack77(message77, book);
-    if (!success || msg.trim().length === 0)
-        return null;
-    // Estimate SNR
-    let xsig = 0;
-    let xnoi = 0;
-    const itone = getTones$1(result.cw);
-    for (let i = 0; i < 79; i++) {
-        xsig += s8[itone[i] * NN + i] ** 2;
-        const ios = (itone[i] + 4) % 7;
-        xnoi += s8[ios * NN + i] ** 2;
-    }
-    let snr = 0.001;
-    const arg = xsig / Math.max(xnoi, 1e-30) - 1.0;
-    if (arg > 0.1)
-        snr = arg;
-    snr = 10 * Math.log10(snr) - 27.0;
-    if (snr < -24)
-        snr = -24;
-    return { msg, freq: f1, dt: xdt, snr };
+    const sorted = [...values].sort((a, b) => a - b);
+    const idx = Math.max(0, Math.min(sorted.length - 1, Math.floor((pct / 100) * (sorted.length - 1))));
+    return sorted[idx];
 }
-function getTones$1(cw) {
-    const tones = new Array(79).fill(0);
-    for (let i = 0; i < 7; i++)
-        tones[i] = icos7[i];
-    for (let i = 0; i < 7; i++)
-        tones[36 + i] = icos7[i];
-    for (let i = 0; i < 7; i++)
-        tones[72 + i] = icos7[i];
-    let k = 7;
-    for (let j = 1; j <= 58; j++) {
-        const i = (j - 1) * 3;
-        if (j === 30)
-            k += 7;
-        const indx = cw[i] * 4 + cw[i + 1] * 2 + cw[i + 2];
-        tones[k] = graymap[indx];
-        k++;
+function polyfitLeastSquares(x, y, degree) {
+    const n = degree + 1;
+    const mat = Array.from({ length: n }, () => new Float64Array(n + 1));
+    const xPows = new Float64Array(2 * degree + 1);
+    for (let p = 0; p <= 2 * degree; p++) {
+        let sum = 0;
+        for (let i = 0; i < x.length; i++) {
+            sum += x[i] ** p;
+        }
+        xPows[p] = sum;
     }
-    return tones;
-}
-/**
- * Mix f0 to baseband and decimate by NDOWN (60x) by extracting frequency bins.
- * Identical to Fortran ft8_downsample.
- */
-function ft8Downsample(cxRe, cxIm, f0, c1Re, c1Im) {
-    const NFFT1 = 192000;
-    const NFFT2 = 3200;
-    const df = 12000.0 / NFFT1;
-    // NSPS is imported, should be 1920
-    const baud = 12000.0 / NSPS; // 6.25
-    const i0 = Math.round(f0 / df);
-    const ft = f0 + 8.5 * baud;
-    const it = Math.min(Math.round(ft / df), NFFT1 / 2);
-    const fb = f0 - 1.5 * baud;
-    const ib = Math.max(1, Math.round(fb / df));
-    c1Re.fill(0);
-    c1Im.fill(0);
-    let k = 0;
-    for (let i = ib; i <= it; i++) {
-        if (k >= NFFT2)
-            break;
-        c1Re[k] = cxRe[i] ?? 0;
-        c1Im[k] = cxIm[i] ?? 0;
-        k++;
+    for (let row = 0; row < n; row++) {
+        for (let col = 0; col < n; col++) {
+            mat[row][col] = xPows[row + col];
+        }
+        let rhs = 0;
+        for (let i = 0; i < x.length; i++) {
+            rhs += y[i] * x[i] ** row;
+        }
+        mat[row][n] = rhs;
     }
-    // Taper
-    const pi = Math.PI;
-    const taper = new Float64Array(101);
-    for (let i = 0; i <= 100; i++) {
-        taper[i] = 0.5 * (1.0 + Math.cos((i * pi) / 100));
-    }
-    for (let i = 0; i <= 100; i++) {
-        if (i >= NFFT2)
-            break;
-        const tap = taper[100 - i];
-        c1Re[i] = c1Re[i] * tap;
-        c1Im[i] = c1Im[i] * tap;
-    }
-    const endTap = k - 1;
-    for (let i = 0; i <= 100; i++) {
-        const idx = endTap - 100 + i;
-        if (idx >= 0 && idx < NFFT2) {
-            const tap = taper[i];
-            c1Re[idx] = c1Re[idx] * tap;
-            c1Im[idx] = c1Im[idx] * tap;
+    for (let col = 0; col < n; col++) {
+        let pivot = col;
+        let maxAbs = Math.abs(mat[col][col]);
+        for (let row = col + 1; row < n; row++) {
+            const a = Math.abs(mat[row][col]);
+            if (a > maxAbs) {
+                maxAbs = a;
+                pivot = row;
+            }
+        }
+        if (maxAbs < 1e-12) {
+            return null;
+        }
+        if (pivot !== col) {
+            const tmp = mat[col];
+            mat[col] = mat[pivot];
+            mat[pivot] = tmp;
+        }
+        const pivotVal = mat[col][col];
+        for (let c = col; c <= n; c++) {
+            mat[col][c] = mat[col][c] / pivotVal;
+        }
+        for (let row = 0; row < n; row++) {
+            if (row === col) {
+                continue;
+            }
+            const factor = mat[row][col];
+            if (factor === 0) {
+                continue;
+            }
+            for (let c = col; c <= n; c++) {
+                mat[row][c] = mat[row][c] - factor * mat[col][c];
+            }
         }
     }
-    // CSHIFT
-    const shift = i0 - ib;
-    const tempRe = new Float64Array(NFFT2);
-    const tempIm = new Float64Array(NFFT2);
-    for (let i = 0; i < NFFT2; i++) {
-        let srcIdx = (i + shift) % NFFT2;
-        if (srcIdx < 0)
-            srcIdx += NFFT2;
-        tempRe[i] = c1Re[srcIdx];
-        tempIm[i] = c1Im[srcIdx];
+    const coeff = new Array(n);
+    for (let i = 0; i < n; i++) {
+        coeff[i] = mat[i][n];
     }
-    for (let i = 0; i < NFFT2; i++) {
-        c1Re[i] = tempRe[i];
-        c1Im[i] = tempIm[i];
+    return coeff;
+}
+function createDownsampleContext() {
+    const df = SAMPLE_RATE / NMAX$1;
+    const baud = SAMPLE_RATE / NSPS$1;
+    const bwTransition = 0.5 * baud;
+    const bwFlat = 4 * baud;
+    const iwt = Math.max(1, Math.trunc(bwTransition / df));
+    const iwf = Math.max(1, Math.trunc(bwFlat / df));
+    const iws = Math.trunc(baud / df);
+    const raw = new Float64Array(NFFT2);
+    for (let i = 0; i < iwt && i < raw.length; i++) {
+        raw[i] = 0.5 * (1 + Math.cos((Math.PI * (iwt - 1 - i)) / iwt));
     }
-    // iFFT
+    for (let i = iwt; i < iwt + iwf && i < raw.length; i++) {
+        raw[i] = 1;
+    }
+    for (let i = iwt + iwf; i < 2 * iwt + iwf && i < raw.length; i++) {
+        raw[i] = 0.5 * (1 + Math.cos((Math.PI * (i - (iwt + iwf))) / iwt));
+    }
+    const window = new Float64Array(NFFT2);
+    for (let i = 0; i < NFFT2; i++) {
+        const src = (i + iws) % NFFT2;
+        window[i] = raw[src];
+    }
+    return { df, window };
+}
+function ft4Downsample(cxRe, cxIm, f0, ctx) {
+    const c1Re = new Float64Array(NFFT2);
+    const c1Im = new Float64Array(NFFT2);
+    const i0 = Math.round(f0 / ctx.df);
+    if (i0 >= 0 && i0 <= NMAX$1 / 2) {
+        c1Re[0] = cxRe[i0] ?? 0;
+        c1Im[0] = cxIm[i0] ?? 0;
+    }
+    for (let i = 1; i <= NFFT2 / 2; i++) {
+        const hi = i0 + i;
+        if (hi >= 0 && hi <= NMAX$1 / 2) {
+            c1Re[i] = cxRe[hi] ?? 0;
+            c1Im[i] = cxIm[hi] ?? 0;
+        }
+        const lo = i0 - i;
+        if (lo >= 0 && lo <= NMAX$1 / 2) {
+            const idx = NFFT2 - i;
+            c1Re[idx] = cxRe[lo] ?? 0;
+            c1Im[idx] = cxIm[lo] ?? 0;
+        }
+    }
+    const scale = 1 / NFFT2;
+    for (let i = 0; i < NFFT2; i++) {
+        const w = (ctx.window[i] ?? 0) * scale;
+        c1Re[i] = c1Re[i] * w;
+        c1Im[i] = c1Im[i] * w;
+    }
     fftComplex(c1Re, c1Im, true);
-    // Scale
-    // Fortran uses 1.0/sqrt(NFFT1 * NFFT2), but our fftComplex(true) scales by 1/NFFT2
-    const scale = Math.sqrt(NFFT2 / NFFT1);
-    for (let i = 0; i < NFFT2; i++) {
-        c1Re[i] = c1Re[i] * scale;
-        c1Im[i] = c1Im[i] * scale;
+    return { re: c1Re, im: c1Im };
+}
+function normalizeComplexPower(re, im, denom) {
+    let sum = 0;
+    for (let i = 0; i < re.length; i++) {
+        sum += re[i] * re[i] + im[i] * im[i];
+    }
+    if (sum <= 0) {
+        return;
+    }
+    const scale = 1 / Math.sqrt(sum / denom);
+    for (let i = 0; i < re.length; i++) {
+        re[i] = re[i] * scale;
+        im[i] = im[i] * scale;
     }
 }
-function sync8d(cd0Re, cd0Im, i0, twkRe, twkIm, useTwk) {
-    const NP2 = 2812;
-    const twopi = 2 * Math.PI;
-    // Precompute Costas sync waveforms
-    const csyncRe = new Float64Array(7 * 32);
-    const csyncIm = new Float64Array(7 * 32);
-    for (let i = 0; i < 7; i++) {
-        let phi = 0;
-        const dphi = (twopi * icos7[i]) / 32;
-        for (let j = 0; j < 32; j++) {
-            csyncRe[i * 32 + j] = Math.cos(phi);
-            csyncIm[i * 32 + j] = Math.sin(phi);
-            phi = (phi + dphi) % twopi;
+function extractFrame(cbRe, cbIm, ibest) {
+    const outRe = new Float64Array(NN$1 * NSS);
+    const outIm = new Float64Array(NN$1 * NSS);
+    for (let i = 0; i < outRe.length; i++) {
+        const src = ibest + i;
+        if (src >= 0 && src < cbRe.length) {
+            outRe[i] = cbRe[src];
+            outIm[i] = cbIm[src];
         }
     }
-    let sync = 0;
-    for (let i = 0; i < 7; i++) {
-        const i1 = i0 + i * 32;
-        const i2 = i1 + 36 * 32;
-        const i3 = i1 + 72 * 32;
-        for (const iStart of [i1, i2, i3]) {
-            let zRe = 0, zIm = 0;
-            if (iStart >= 0 && iStart + 31 < NP2) {
-                for (let j = 0; j < 32; j++) {
-                    let sRe = csyncRe[i * 32 + j];
-                    let sIm = csyncIm[i * 32 + j];
-                    if (useTwk && twkRe && twkIm) {
-                        const tRe = twkRe[j] * sRe - twkIm[j] * sIm;
-                        const tIm = twkRe[j] * sIm + twkIm[j] * sRe;
-                        sRe = tRe;
-                        sIm = tIm;
-                    }
-                    // Conjugate multiply: cd0 * conj(csync)
-                    const dRe = cd0Re[iStart + j];
-                    const dIm = cd0Im[iStart + j];
-                    zRe += dRe * sRe + dIm * sIm;
-                    zIm += dIm * sRe - dRe * sIm;
-                }
-            }
-            sync += zRe * zRe + zIm * zIm;
+    return { re: outRe, im: outIm };
+}
+function createTweakedSyncTemplates() {
+    const base = createBaseSyncTemplates();
+    const fsample = FS2 / 2;
+    const out = new Map();
+    for (let idf = -16; idf <= 16; idf++) {
+        const tweak = createFrequencyTweak(idf, 2 * NSS, fsample);
+        out.set(idf, [
+            applyTweak(base[0], tweak),
+            applyTweak(base[1], tweak),
+            applyTweak(base[2], tweak),
+            applyTweak(base[3], tweak),
+        ]);
+    }
+    return out;
+}
+function createBaseSyncTemplates() {
+    return [
+        buildSyncTemplate(COSTAS_A),
+        buildSyncTemplate(COSTAS_B),
+        buildSyncTemplate(COSTAS_C),
+        buildSyncTemplate(COSTAS_D),
+    ];
+}
+function buildSyncTemplate(tones) {
+    const re = new Float64Array(2 * NSS);
+    const im = new Float64Array(2 * NSS);
+    let k = 0;
+    let phi = 0;
+    for (const tone of tones) {
+        const dphi = (TWO_PI$1 * tone * 2) / NSS;
+        for (let j = 0; j < NSS / 2; j++) {
+            re[k] = Math.cos(phi);
+            im[k] = Math.sin(phi);
+            phi = (phi + dphi) % TWO_PI$1;
+            k++;
         }
+    }
+    return { re, im };
+}
+function createFrequencyTweak(idf, npts, fsample) {
+    const re = new Float64Array(npts);
+    const im = new Float64Array(npts);
+    const dphi = (TWO_PI$1 * idf) / fsample;
+    const stepRe = Math.cos(dphi);
+    const stepIm = Math.sin(dphi);
+    let wRe = 1;
+    let wIm = 0;
+    for (let i = 0; i < npts; i++) {
+        const newRe = wRe * stepRe - wIm * stepIm;
+        const newIm = wRe * stepIm + wIm * stepRe;
+        wRe = newRe;
+        wIm = newIm;
+        re[i] = wRe;
+        im[i] = wIm;
+    }
+    return { re, im };
+}
+function applyTweak(template, tweak) {
+    const re = new Float64Array(template.re.length);
+    const im = new Float64Array(template.im.length);
+    for (let i = 0; i < template.re.length; i++) {
+        const sr = template.re[i];
+        const si = template.im[i];
+        const tr = tweak.re[i];
+        const ti = tweak.im[i];
+        re[i] = tr * sr - ti * si;
+        im[i] = tr * si + ti * sr;
+    }
+    return { re, im };
+}
+function sync4d(cdRe, cdIm, i0, templates) {
+    const starts = [i0, i0 + 33 * NSS, i0 + 66 * NSS, i0 + 99 * NSS];
+    let sync = 0;
+    for (let i = 0; i < 4; i++) {
+        const z = correlateStride2(cdRe, cdIm, starts[i], templates[i].re, templates[i].im);
+        if (z.count <= 16) {
+            continue;
+        }
+        sync += Math.hypot(z.re, z.im) / (2 * NSS);
     }
     return sync;
 }
-function normalizeBmet(bmet) {
-    const n = bmet.length;
-    let sum = 0, sum2 = 0;
-    for (let i = 0; i < n; i++) {
+function correlateStride2(cdRe, cdIm, start, templateRe, templateIm) {
+    let zRe = 0;
+    let zIm = 0;
+    let count = 0;
+    for (let i = 0; i < templateRe.length; i++) {
+        const idx = start + 2 * i;
+        if (idx < 0 || idx >= cdRe.length) {
+            continue;
+        }
+        const sRe = templateRe[i];
+        const sIm = templateIm[i];
+        const dRe = cdRe[idx];
+        const dIm = cdIm[idx];
+        zRe += dRe * sRe + dIm * sIm;
+        zIm += dIm * sRe - dRe * sIm;
+        count++;
+    }
+    return { re: zRe, im: zIm, count };
+}
+function getFt4Bitmetrics(cdRe, cdIm) {
+    const csRe = new Float64Array(4 * NN$1);
+    const csIm = new Float64Array(4 * NN$1);
+    const s4 = new Float64Array(4 * NN$1);
+    const symbRe = new Float64Array(NSS);
+    const symbIm = new Float64Array(NSS);
+    for (let k = 0; k < NN$1; k++) {
+        const i1 = k * NSS;
+        for (let i = 0; i < NSS; i++) {
+            symbRe[i] = cdRe[i1 + i];
+            symbIm[i] = cdIm[i1 + i];
+        }
+        fftComplex(symbRe, symbIm, false);
+        for (let tone = 0; tone < 4; tone++) {
+            const idx = tone * NN$1 + k;
+            const re = symbRe[tone];
+            const im = symbIm[tone];
+            csRe[idx] = re;
+            csIm[idx] = im;
+            s4[idx] = Math.hypot(re, im);
+        }
+    }
+    let nsync = 0;
+    for (let k = 0; k < 4; k++) {
+        if (maxTone(s4, k) === COSTAS_A[k]) {
+            nsync++;
+        }
+        if (maxTone(s4, 33 + k) === COSTAS_B[k]) {
+            nsync++;
+        }
+        if (maxTone(s4, 66 + k) === COSTAS_C[k]) {
+            nsync++;
+        }
+        if (maxTone(s4, 99 + k) === COSTAS_D[k]) {
+            nsync++;
+        }
+    }
+    const bitmetrics1 = new Float64Array(2 * NN$1);
+    const bitmetrics2 = new Float64Array(2 * NN$1);
+    const bitmetrics3 = new Float64Array(2 * NN$1);
+    if (nsync < 6) {
+        return { bitmetrics1, bitmetrics2, bitmetrics3, badsync: true };
+    }
+    for (let nseq = 1; nseq <= 3; nseq++) {
+        const nsym = nseq === 1 ? 1 : nseq === 2 ? 2 : 4;
+        const nt = 1 << (2 * nsym); // 4, 16, 256
+        const ibmax = nseq === 1 ? 1 : nseq === 2 ? 3 : 7;
+        const s2 = new Float64Array(nt);
+        for (let ks = 1; ks <= NN$1 - nsym + 1; ks += nsym) {
+            for (let i = 0; i < nt; i++) {
+                const i1 = Math.floor(i / 64);
+                const i2 = Math.floor((i & 63) / 16);
+                const i3 = Math.floor((i & 15) / 4);
+                const i4 = i & 3;
+                if (nsym === 1) {
+                    const t = GRAYMAP[i4];
+                    const idx = t * NN$1 + (ks - 1);
+                    s2[i] = Math.hypot(csRe[idx], csIm[idx]);
+                }
+                else if (nsym === 2) {
+                    const t3 = GRAYMAP[i3];
+                    const t4 = GRAYMAP[i4];
+                    const iA = t3 * NN$1 + (ks - 1);
+                    const iB = t4 * NN$1 + ks;
+                    const re = csRe[iA] + csRe[iB];
+                    const im = csIm[iA] + csIm[iB];
+                    s2[i] = Math.hypot(re, im);
+                }
+                else {
+                    const t1 = GRAYMAP[i1];
+                    const t2 = GRAYMAP[i2];
+                    const t3 = GRAYMAP[i3];
+                    const t4 = GRAYMAP[i4];
+                    const iA = t1 * NN$1 + (ks - 1);
+                    const iB = t2 * NN$1 + ks;
+                    const iC = t3 * NN$1 + (ks + 1);
+                    const iD = t4 * NN$1 + (ks + 2);
+                    const re = csRe[iA] + csRe[iB] + csRe[iC] + csRe[iD];
+                    const im = csIm[iA] + csIm[iB] + csIm[iC] + csIm[iD];
+                    s2[i] = Math.hypot(re, im);
+                }
+            }
+            const ipt = 1 + (ks - 1) * 2;
+            for (let ib = 0; ib <= ibmax; ib++) {
+                const mask = 1 << (ibmax - ib);
+                let max1 = -1e30;
+                let max0 = -1e30;
+                for (let i = 0; i < nt; i++) {
+                    const v = s2[i];
+                    if ((i & mask) !== 0) {
+                        if (v > max1) {
+                            max1 = v;
+                        }
+                    }
+                    else if (v > max0) {
+                        max0 = v;
+                    }
+                }
+                const idx = ipt + ib;
+                if (idx > 2 * NN$1) {
+                    continue;
+                }
+                const bm = max1 - max0;
+                if (nseq === 1) {
+                    bitmetrics1[idx - 1] = bm;
+                }
+                else if (nseq === 2) {
+                    bitmetrics2[idx - 1] = bm;
+                }
+                else {
+                    bitmetrics3[idx - 1] = bm;
+                }
+            }
+        }
+    }
+    bitmetrics2[208] = bitmetrics1[208];
+    bitmetrics2[209] = bitmetrics1[209];
+    bitmetrics3[208] = bitmetrics1[208];
+    bitmetrics3[209] = bitmetrics1[209];
+    normalizeBitMetrics(bitmetrics1);
+    normalizeBitMetrics(bitmetrics2);
+    normalizeBitMetrics(bitmetrics3);
+    return { bitmetrics1, bitmetrics2, bitmetrics3, badsync: false };
+}
+function maxTone(s4, symbolIndex) {
+    let bestTone = 0;
+    let bestValue = -1;
+    for (let tone = 0; tone < 4; tone++) {
+        const v = s4[tone * NN$1 + symbolIndex];
+        if (v > bestValue) {
+            bestValue = v;
+            bestTone = tone;
+        }
+    }
+    return bestTone;
+}
+function normalizeBitMetrics(bmet) {
+    let sum = 0;
+    let sum2 = 0;
+    for (let i = 0; i < bmet.length; i++) {
         sum += bmet[i];
         sum2 += bmet[i] * bmet[i];
     }
-    const avg = sum / n;
-    const avg2 = sum2 / n;
+    const avg = sum / bmet.length;
+    const avg2 = sum2 / bmet.length;
     const variance = avg2 - avg * avg;
     const sigma = variance > 0 ? Math.sqrt(variance) : Math.sqrt(avg2);
-    if (sigma > 0) {
-        for (let i = 0; i < n; i++)
-            bmet[i] = bmet[i] / sigma;
+    if (sigma <= 0) {
+        return;
+    }
+    for (let i = 0; i < bmet.length; i++) {
+        bmet[i] = bmet[i] / sigma;
     }
 }
-function resample(input, fromRate, toRate, outLen) {
+function passesHardSyncQuality(bitmetrics1) {
+    const hard = new Uint8Array(bitmetrics1.length);
+    for (let i = 0; i < bitmetrics1.length; i++) {
+        hard[i] = bitmetrics1[i] >= 0 ? 1 : 0;
+    }
+    let score = 0;
+    for (const pattern of HARD_SYNC_PATTERNS) {
+        for (let i = 0; i < pattern.bits.length; i++) {
+            if (hard[pattern.offset + i] === pattern.bits[i]) {
+                score++;
+            }
+        }
+    }
+    return score >= 10;
+}
+function buildLlrs(bitmetrics1, bitmetrics2, bitmetrics3) {
+    const llra = new Float64Array(174);
+    const llrb = new Float64Array(174);
+    const llrc = new Float64Array(174);
+    for (let i = 0; i < 58; i++) {
+        llra[i] = bitmetrics1[8 + i];
+        llra[58 + i] = bitmetrics1[74 + i];
+        llra[116 + i] = bitmetrics1[140 + i];
+        llrb[i] = bitmetrics2[8 + i];
+        llrb[58 + i] = bitmetrics2[74 + i];
+        llrb[116 + i] = bitmetrics2[140 + i];
+        llrc[i] = bitmetrics3[8 + i];
+        llrc[58 + i] = bitmetrics3[74 + i];
+        llrc[116 + i] = bitmetrics3[140 + i];
+    }
+    return [llra, llrb, llrc];
+}
+function hasNonZeroBit(bits) {
+    for (const bit of bits) {
+        if (bit !== 0) {
+            return true;
+        }
+    }
+    return false;
+}
+function toFt4Snr(syncMinusOne) {
+    if (syncMinusOne > 0) {
+        return Math.round(Math.max(-21, 10 * Math.log10(syncMinusOne) - 14.8));
+    }
+    return -21;
+}
+function resample$1(input, fromRate, toRate, outLen) {
     const out = new Float64Array(outLen);
     const ratio = fromRate / toRate;
     for (let i = 0; i < outLen; i++) {
@@ -2045,9 +2243,12 @@ function packFreeText(msg) {
 }
 
 const TWO_PI = 2 * Math.PI;
-const DEFAULT_SAMPLE_RATE = 12_000;
-const DEFAULT_SAMPLES_PER_SYMBOL = 1_920;
-const DEFAULT_BT = 2.0;
+const FT8_DEFAULT_SAMPLE_RATE = 12_000;
+const FT8_DEFAULT_SAMPLES_PER_SYMBOL = 1_920;
+const FT8_DEFAULT_BT = 2.0;
+const FT4_DEFAULT_SAMPLE_RATE = 12_000;
+const FT4_DEFAULT_SAMPLES_PER_SYMBOL = NSPS$1;
+const FT4_DEFAULT_BT = 1.0;
 const MODULATION_INDEX = 1.0;
 function assertPositiveFinite(value, name) {
     if (!Number.isFinite(value) || value <= 0) {
@@ -2070,15 +2271,14 @@ function gfskPulse(bt, tt) {
     const scale = Math.PI * Math.sqrt(2 / Math.log(2)) * bt;
     return 0.5 * (erfApprox(scale * (tt + 0.5)) - erfApprox(scale * (tt - 0.5)));
 }
-function generateFT8Waveform(tones, options = {}) {
-    // Mirrors the FT8 path in lib/ft8/gen_ft8wave.f90.
+function generateGfskWaveform(tones, options, defaults, shape) {
     const nsym = tones.length;
     if (nsym === 0) {
         return new Float32Array(0);
     }
-    const sampleRate = options.sampleRate ?? DEFAULT_SAMPLE_RATE;
-    const nsps = options.samplesPerSymbol ?? DEFAULT_SAMPLES_PER_SYMBOL;
-    const bt = options.bt ?? DEFAULT_BT;
+    const sampleRate = options.sampleRate ?? defaults.sampleRate;
+    const nsps = options.samplesPerSymbol ?? defaults.samplesPerSymbol;
+    const bt = options.bt ?? defaults.bt;
     const f0 = options.baseFrequency ?? 0;
     assertPositiveFinite(sampleRate, "sampleRate");
     assertPositiveFinite(nsps, "samplesPerSymbol");
@@ -2089,7 +2289,7 @@ function generateFT8Waveform(tones, options = {}) {
     if (!Number.isInteger(nsps)) {
         throw new Error("samplesPerSymbol must be an integer");
     }
-    const nwave = nsym * nsps;
+    const nwave = (shape.includeRampSymbols ? nsym + 2 : nsym) * nsps;
     const pulse = new Float64Array(3 * nsps);
     for (let i = 0; i < pulse.length; i++) {
         const tt = (i + 1 - 1.5 * nsps) / nsps;
@@ -2117,8 +2317,9 @@ function generateFT8Waveform(tones, options = {}) {
     }
     const wave = new Float32Array(nwave);
     let phi = 0;
+    const phaseStart = shape.includeRampSymbols ? 0 : nsps;
     for (let k = 0; k < nwave; k++) {
-        const j = nsps + k; // skip the leading dummy symbol
+        const j = phaseStart + k;
         wave[k] = Math.sin(phi);
         phi += dphi[j];
         phi %= TWO_PI;
@@ -2126,18 +2327,66 @@ function generateFT8Waveform(tones, options = {}) {
             phi += TWO_PI;
         }
     }
-    const nramp = Math.round(nsps / 8);
-    for (let i = 0; i < nramp; i++) {
-        const up = (1 - Math.cos((TWO_PI * i) / (2 * nramp))) / 2;
-        wave[i] *= up;
+    if (shape.fullSymbolRamp) {
+        for (let i = 0; i < nsps; i++) {
+            const up = (1 - Math.cos((TWO_PI * i) / (2 * nsps))) / 2;
+            wave[i] *= up;
+        }
+        const tailStart = (nsym + 1) * nsps;
+        for (let i = 0; i < nsps; i++) {
+            const down = (1 + Math.cos((TWO_PI * i) / (2 * nsps))) / 2;
+            wave[tailStart + i] *= down;
+        }
     }
-    const tailStart = nwave - nramp;
-    for (let i = 0; i < nramp; i++) {
-        const down = (1 + Math.cos((TWO_PI * i) / (2 * nramp))) / 2;
-        wave[tailStart + i] *= down;
+    else {
+        const nramp = Math.round(nsps / 8);
+        for (let i = 0; i < nramp; i++) {
+            const up = (1 - Math.cos((TWO_PI * i) / (2 * nramp))) / 2;
+            wave[i] *= up;
+        }
+        const tailStart = nwave - nramp;
+        for (let i = 0; i < nramp; i++) {
+            const down = (1 + Math.cos((TWO_PI * i) / (2 * nramp))) / 2;
+            wave[tailStart + i] *= down;
+        }
     }
     return wave;
 }
+function generateFT8Waveform(tones, options = {}) {
+    // Mirrors the FT8 path in lib/ft8/gen_ft8wave.f90.
+    return generateGfskWaveform(tones, options, {
+        sampleRate: FT8_DEFAULT_SAMPLE_RATE,
+        samplesPerSymbol: FT8_DEFAULT_SAMPLES_PER_SYMBOL,
+        bt: FT8_DEFAULT_BT,
+    }, {
+        includeRampSymbols: false,
+        fullSymbolRamp: false,
+    });
+}
+function generateFT4Waveform(tones, options = {}) {
+    // Mirrors lib/ft4/gen_ft4wave.f90.
+    return generateGfskWaveform(tones, options, {
+        sampleRate: FT4_DEFAULT_SAMPLE_RATE,
+        samplesPerSymbol: FT4_DEFAULT_SAMPLES_PER_SYMBOL,
+        bt: FT4_DEFAULT_BT,
+    }, {
+        includeRampSymbols: true,
+        fullSymbolRamp: true,
+    });
+}
+
+/** FT8-specific constants (lib/ft8/ft8_params.f90). */
+const NSPS = 1920;
+const NFFT1 = 2 * NSPS; // 3840
+const NSTEP = NSPS / 4; // 480
+const NMAX = 15 * 12_000; // 180000
+const NHSYM = Math.floor(NMAX / NSTEP) - 3; // 372
+const NDOWN = 60;
+const NN = 79;
+/** 7-symbol Costas array for sync. */
+const COSTAS = [3, 1, 4, 0, 6, 5, 2];
+/** 8-tone Gray mapping. */
+const GRAY_MAP = [0, 1, 3, 2, 5, 6, 4, 7];
 
 function generateLdpcGMatrix() {
     const K = 91;
@@ -2188,32 +2437,678 @@ function encode174_91(msg77) {
     }
     return codeword;
 }
-function getTones(codeword) {
+function getTones$2(codeword) {
     const tones = new Array(79).fill(0);
     for (let i = 0; i < 7; i++)
-        tones[i] = icos7[i];
+        tones[i] = COSTAS[i];
     for (let i = 0; i < 7; i++)
-        tones[36 + i] = icos7[i];
+        tones[36 + i] = COSTAS[i];
     for (let i = 0; i < 7; i++)
-        tones[72 + i] = icos7[i];
+        tones[72 + i] = COSTAS[i];
     let k = 7;
     for (let j = 1; j <= 58; j++) {
         const i = j * 3 - 3; // codeword is 0-indexed in JS, but the loop was j=1 to 58
         if (j === 30)
             k += 7;
         const indx = codeword[i] * 4 + codeword[i + 1] * 2 + codeword[i + 2];
-        tones[k] = graymap[indx];
+        tones[k] = GRAY_MAP[indx];
         k++;
     }
     return tones;
 }
-function encodeMessage(msg) {
+function encodeMessage$1(msg) {
     const bits77 = pack77(msg);
     const codeword = encode174_91(bits77);
-    return getTones(codeword);
+    return getTones$2(codeword);
+}
+function encode$1(msg, options = {}) {
+    return generateFT8Waveform(encodeMessage$1(msg), options);
+}
+
+/**
+ * Convert FT4 LDPC codeword bits into 103 channel tones.
+ * Port of lib/ft4/genft4.f90.
+ */
+function getTones$1(codeword) {
+    const dataTones = new Array(87);
+    for (let i = 0; i < 87; i++) {
+        const b0 = codeword[2 * i] ?? 0;
+        const b1 = codeword[2 * i + 1] ?? 0;
+        const symbol = b1 + 2 * b0;
+        dataTones[i] = GRAYMAP[symbol];
+    }
+    const tones = new Array(103);
+    tones.splice(0, 4, ...COSTAS_A);
+    tones.splice(4, 29, ...dataTones.slice(0, 29));
+    tones.splice(33, 4, ...COSTAS_B);
+    tones.splice(37, 29, ...dataTones.slice(29, 58));
+    tones.splice(66, 4, ...COSTAS_C);
+    tones.splice(70, 29, ...dataTones.slice(58, 87));
+    tones.splice(99, 4, ...COSTAS_D);
+    return tones;
+}
+function encodeMessage(msg) {
+    const bits77 = pack77(msg);
+    const scrambled = xorWithScrambler(bits77);
+    const codeword = encode174_91(scrambled);
+    return getTones$1(codeword);
 }
 function encode(msg, options = {}) {
-    return generateFT8Waveform(encodeMessage(msg), options);
+    return generateFT4Waveform(encodeMessage(msg), options);
+}
+
+/**
+ * Decode all FT8 signals in an audio buffer.
+ * Input: mono audio samples at `sampleRate` Hz, duration ~15s.
+ */
+function decode(samples, options = {}) {
+    const sampleRate = options.sampleRate ?? SAMPLE_RATE;
+    const nfa = options.freqLow ?? 200;
+    const nfb = options.freqHigh ?? 3000;
+    const syncmin = options.syncMin ?? 1.2;
+    const depth = options.depth ?? 2;
+    const maxCandidates = options.maxCandidates ?? 300;
+    const book = options.hashCallBook;
+    // Resample to 12000 Hz if needed
+    let dd;
+    if (sampleRate === SAMPLE_RATE) {
+        dd = new Float64Array(NMAX);
+        const len = Math.min(samples.length, NMAX);
+        for (let i = 0; i < len; i++)
+            dd[i] = samples[i];
+    }
+    else {
+        dd = resample(samples, sampleRate, SAMPLE_RATE, NMAX);
+    }
+    // Compute huge FFT for downsampling caching
+    const NFFT1_LONG = 192000;
+    const cxRe = new Float64Array(NFFT1_LONG);
+    const cxIm = new Float64Array(NFFT1_LONG);
+    for (let i = 0; i < NMAX; i++) {
+        cxRe[i] = dd[i] ?? 0;
+    }
+    fftComplex(cxRe, cxIm, false);
+    // Compute spectrogram and find sync candidates
+    const { candidates, sbase } = sync8(dd, nfa, nfb, syncmin, maxCandidates);
+    const decoded = [];
+    const seenMessages = new Set();
+    for (const cand of candidates) {
+        const result = ft8b(dd, cxRe, cxIm, cand.freq, cand.dt, sbase, depth, book);
+        if (!result)
+            continue;
+        if (seenMessages.has(result.msg))
+            continue;
+        seenMessages.add(result.msg);
+        decoded.push({
+            freq: result.freq,
+            dt: result.dt - 0.5,
+            snr: result.snr,
+            msg: result.msg,
+            sync: cand.sync,
+        });
+    }
+    return decoded;
+}
+function sync8(dd, nfa, nfb, syncmin, maxcand) {
+    const JZ = 62;
+    // Fortran uses NFFT1=3840 for the spectrogram FFT; we need a power of 2
+    const fftSize = nextPow2(NFFT1); // 4096
+    const halfSize = fftSize / 2; // 2048
+    const tstep = NSTEP / SAMPLE_RATE;
+    const df = SAMPLE_RATE / fftSize;
+    const fac = 1.0 / 300.0;
+    // Compute symbol spectra, stepping by NSTEP
+    const s = new Float64Array(halfSize * NHSYM);
+    const savg = new Float64Array(halfSize);
+    const xRe = new Float64Array(fftSize);
+    const xIm = new Float64Array(fftSize);
+    for (let j = 0; j < NHSYM; j++) {
+        const ia = j * NSTEP;
+        xRe.fill(0);
+        xIm.fill(0);
+        for (let i = 0; i < NSPS && ia + i < dd.length; i++) {
+            xRe[i] = fac * dd[ia + i];
+        }
+        fftComplex(xRe, xIm, false);
+        for (let i = 0; i < halfSize; i++) {
+            const power = xRe[i] * xRe[i] + xIm[i] * xIm[i];
+            s[i * NHSYM + j] = power;
+            savg[i] = (savg[i] ?? 0) + power;
+        }
+    }
+    // Compute baseline
+    const sbase = computeBaseline(savg, nfa, nfb, df, halfSize);
+    const ia = Math.max(1, Math.round(nfa / df));
+    const ib = Math.min(halfSize - 14, Math.round(nfb / df));
+    const nssy = Math.floor(NSPS / NSTEP);
+    const nfos = Math.round(SAMPLE_RATE / NSPS / df); // ~2 bins per tone spacing
+    const jstrt = Math.round(0.5 / tstep);
+    // 2D sync correlation
+    const sync2d = new Float64Array((ib - ia + 1) * (2 * JZ + 1));
+    const width = 2 * JZ + 1;
+    for (let i = ia; i <= ib; i++) {
+        for (let jj = -JZ; jj <= JZ; jj++) {
+            let ta = 0, tb = 0, tc = 0;
+            let t0a = 0, t0b = 0, t0c = 0;
+            for (let n = 0; n < 7; n++) {
+                const m = jj + jstrt + nssy * n;
+                const iCostas = i + nfos * COSTAS[n];
+                if (m >= 0 && m < NHSYM && iCostas < halfSize) {
+                    ta += s[iCostas * NHSYM + m];
+                    for (let tone = 0; tone <= 6; tone++) {
+                        const idx = i + nfos * tone;
+                        if (idx < halfSize)
+                            t0a += s[idx * NHSYM + m];
+                    }
+                }
+                const m36 = m + nssy * 36;
+                if (m36 >= 0 && m36 < NHSYM && iCostas < halfSize) {
+                    tb += s[iCostas * NHSYM + m36];
+                    for (let tone = 0; tone <= 6; tone++) {
+                        const idx = i + nfos * tone;
+                        if (idx < halfSize)
+                            t0b += s[idx * NHSYM + m36];
+                    }
+                }
+                const m72 = m + nssy * 72;
+                if (m72 >= 0 && m72 < NHSYM && iCostas < halfSize) {
+                    tc += s[iCostas * NHSYM + m72];
+                    for (let tone = 0; tone <= 6; tone++) {
+                        const idx = i + nfos * tone;
+                        if (idx < halfSize)
+                            t0c += s[idx * NHSYM + m72];
+                    }
+                }
+            }
+            const t = ta + tb + tc;
+            const t0total = t0a + t0b + t0c;
+            const t0 = (t0total - t) / 6.0;
+            const syncVal = t0 > 0 ? t / t0 : 0;
+            const tbc = tb + tc;
+            const t0bc = t0b + t0c;
+            const t0bc2 = (t0bc - tbc) / 6.0;
+            const syncBc = t0bc2 > 0 ? tbc / t0bc2 : 0;
+            sync2d[(i - ia) * width + (jj + JZ)] = Math.max(syncVal, syncBc);
+        }
+    }
+    // Find peaks
+    const candidates0 = [];
+    const mlag = 10;
+    for (let i = ia; i <= ib; i++) {
+        let bestSync = -1;
+        let bestJ = 0;
+        for (let j = -mlag; j <= mlag; j++) {
+            const v = sync2d[(i - ia) * width + (j + JZ)];
+            if (v > bestSync) {
+                bestSync = v;
+                bestJ = j;
+            }
+        }
+        // Also check wider range
+        let bestSync2 = -1;
+        let bestJ2 = 0;
+        for (let j = -JZ; j <= JZ; j++) {
+            const v = sync2d[(i - ia) * width + (j + JZ)];
+            if (v > bestSync2) {
+                bestSync2 = v;
+                bestJ2 = j;
+            }
+        }
+        if (bestSync >= syncmin) {
+            candidates0.push({
+                freq: i * df,
+                dt: (bestJ - 0.5) * tstep,
+                sync: bestSync,
+            });
+        }
+        if (Math.abs(bestJ2 - bestJ) > 0 && bestSync2 >= syncmin) {
+            candidates0.push({
+                freq: i * df,
+                dt: (bestJ2 - 0.5) * tstep,
+                sync: bestSync2,
+            });
+        }
+    }
+    // Compute baseline normalization for sync values
+    const syncValues = candidates0.map((c) => c.sync);
+    syncValues.sort((a, b) => a - b);
+    const pctileIdx = Math.max(0, Math.round(0.4 * syncValues.length) - 1);
+    const base = syncValues[pctileIdx] ?? 1;
+    if (base > 0) {
+        for (const c of candidates0)
+            c.sync /= base;
+    }
+    // Remove near-duplicate candidates
+    for (let i = 0; i < candidates0.length; i++) {
+        for (let j = 0; j < i; j++) {
+            const fdiff = Math.abs(candidates0[i].freq - candidates0[j].freq);
+            const tdiff = Math.abs(candidates0[i].dt - candidates0[j].dt);
+            if (fdiff < 4.0 && tdiff < 0.04) {
+                if (candidates0[i].sync >= candidates0[j].sync) {
+                    candidates0[j].sync = 0;
+                }
+                else {
+                    candidates0[i].sync = 0;
+                }
+            }
+        }
+    }
+    // Sort by sync descending, take top maxcand
+    const filtered = candidates0.filter((c) => c.sync >= syncmin);
+    filtered.sort((a, b) => b.sync - a.sync);
+    return { candidates: filtered.slice(0, maxcand), sbase };
+}
+function computeBaseline(savg, nfa, nfb, df, nh1) {
+    const sbase = new Float64Array(nh1);
+    const ia = Math.max(1, Math.round(nfa / df));
+    const ib = Math.min(nh1 - 1, Math.round(nfb / df));
+    // Smooth the spectrum to get baseline
+    const window = 50; // bins
+    for (let i = 0; i < nh1; i++) {
+        let sum = 0;
+        let count = 0;
+        const lo = Math.max(ia, i - window);
+        const hi = Math.min(ib, i + window);
+        for (let j = lo; j <= hi; j++) {
+            sum += savg[j];
+            count++;
+        }
+        sbase[i] = count > 0 ? 10 * Math.log10(Math.max(1e-30, sum / count)) : 0;
+    }
+    return sbase;
+}
+function ft8b(_dd0, cxRe, cxIm, f1, xdt, _sbase, depth, book) {
+    const NFFT2 = 3200;
+    const NP2 = 2812;
+    const fs2 = SAMPLE_RATE / NDOWN;
+    const dt2 = 1.0 / fs2;
+    const twopi = 2 * Math.PI;
+    // Downsample: mix to baseband and filter
+    const cd0Re = new Float64Array(NFFT2);
+    const cd0Im = new Float64Array(NFFT2);
+    ft8Downsample(cxRe, cxIm, f1, cd0Re, cd0Im);
+    // Find best time offset
+    const i0 = Math.round((xdt + 0.5) * fs2);
+    let smax = 0;
+    let ibest = i0;
+    for (let idt = i0 - 10; idt <= i0 + 10; idt++) {
+        const sync = sync8d(cd0Re, cd0Im, idt, null, null, false);
+        if (sync > smax) {
+            smax = sync;
+            ibest = idt;
+        }
+    }
+    // Fine frequency search
+    smax = 0;
+    let delfbest = 0;
+    for (let ifr = -5; ifr <= 5; ifr++) {
+        const delf = ifr * 0.5;
+        const dphi = twopi * delf * dt2;
+        const twkRe = new Float64Array(32);
+        const twkIm = new Float64Array(32);
+        let phi = 0;
+        for (let i = 0; i < 32; i++) {
+            twkRe[i] = Math.cos(phi);
+            twkIm[i] = Math.sin(phi);
+            phi = (phi + dphi) % twopi;
+        }
+        const sync = sync8d(cd0Re, cd0Im, ibest, twkRe, twkIm, true);
+        if (sync > smax) {
+            smax = sync;
+            delfbest = delf;
+        }
+    }
+    // Apply frequency correction and re-downsample
+    f1 += delfbest;
+    ft8Downsample(cxRe, cxIm, f1, cd0Re, cd0Im);
+    // Refine time offset
+    const ss = new Float64Array(9);
+    for (let idt = -4; idt <= 4; idt++) {
+        ss[idt + 4] = sync8d(cd0Re, cd0Im, ibest + idt, null, null, false);
+    }
+    let maxss = -1;
+    let maxIdx = 4;
+    for (let i = 0; i < 9; i++) {
+        if (ss[i] > maxss) {
+            maxss = ss[i];
+            maxIdx = i;
+        }
+    }
+    ibest = ibest + maxIdx - 4;
+    xdt = (ibest - 1) * dt2;
+    // Extract 8-tone soft symbols for each of NN=79 symbols
+    const s8 = new Float64Array(8 * NN);
+    const csRe = new Float64Array(8 * NN);
+    const csIm = new Float64Array(8 * NN);
+    const symbRe = new Float64Array(32);
+    const symbIm = new Float64Array(32);
+    for (let k = 0; k < NN; k++) {
+        const i1 = ibest + k * 32;
+        symbRe.fill(0);
+        symbIm.fill(0);
+        if (i1 >= 0 && i1 + 31 < NP2) {
+            for (let j = 0; j < 32; j++) {
+                symbRe[j] = cd0Re[i1 + j];
+                symbIm[j] = cd0Im[i1 + j];
+            }
+        }
+        fftComplex(symbRe, symbIm, false);
+        for (let tone = 0; tone < 8; tone++) {
+            const re = symbRe[tone] / 1000;
+            const im = symbIm[tone] / 1000;
+            csRe[tone * NN + k] = re;
+            csIm[tone * NN + k] = im;
+            s8[tone * NN + k] = Math.sqrt(re * re + im * im);
+        }
+    }
+    // Sync quality check
+    let nsync = 0;
+    for (let k = 0; k < 7; k++) {
+        for (const offset of [0, 36, 72]) {
+            let maxTone = 0;
+            let maxVal = -1;
+            for (let t = 0; t < 8; t++) {
+                const v = s8[t * NN + k + offset];
+                if (v > maxVal) {
+                    maxVal = v;
+                    maxTone = t;
+                }
+            }
+            if (maxTone === COSTAS[k])
+                nsync++;
+        }
+    }
+    if (nsync <= 6)
+        return null;
+    // Compute soft bit metrics for multiple nsym values (1, 2, 3)
+    // and a normalized version, matching the Fortran ft8b passes 1-4
+    const bmeta = new Float64Array(N_LDPC); // nsym=1
+    const bmetb = new Float64Array(N_LDPC); // nsym=2
+    const bmetc = new Float64Array(N_LDPC); // nsym=3
+    const bmetd = new Float64Array(N_LDPC); // nsym=1 normalized
+    for (let nsym = 1; nsym <= 3; nsym++) {
+        const nt = 1 << (3 * nsym); // 8, 64, 512
+        const ibmax = nsym === 1 ? 2 : nsym === 2 ? 5 : 8;
+        for (let ihalf = 1; ihalf <= 2; ihalf++) {
+            for (let k = 1; k <= 29; k += nsym) {
+                const ks = ihalf === 1 ? k + 7 : k + 43;
+                const s2 = new Float64Array(nt);
+                for (let i = 0; i < nt; i++) {
+                    const i1 = Math.floor(i / 64);
+                    const i2 = Math.floor((i & 63) / 8);
+                    const i3 = i & 7;
+                    if (nsym === 1) {
+                        const re = csRe[GRAY_MAP[i3] * NN + ks - 1];
+                        const im = csIm[GRAY_MAP[i3] * NN + ks - 1];
+                        s2[i] = Math.sqrt(re * re + im * im);
+                    }
+                    else if (nsym === 2) {
+                        const sRe = csRe[GRAY_MAP[i2] * NN + ks - 1] + csRe[GRAY_MAP[i3] * NN + ks];
+                        const sIm = csIm[GRAY_MAP[i2] * NN + ks - 1] + csIm[GRAY_MAP[i3] * NN + ks];
+                        s2[i] = Math.sqrt(sRe * sRe + sIm * sIm);
+                    }
+                    else {
+                        const sRe = csRe[GRAY_MAP[i1] * NN + ks - 1] +
+                            csRe[GRAY_MAP[i2] * NN + ks] +
+                            csRe[GRAY_MAP[i3] * NN + ks + 1];
+                        const sIm = csIm[GRAY_MAP[i1] * NN + ks - 1] +
+                            csIm[GRAY_MAP[i2] * NN + ks] +
+                            csIm[GRAY_MAP[i3] * NN + ks + 1];
+                        s2[i] = Math.sqrt(sRe * sRe + sIm * sIm);
+                    }
+                }
+                // Fortran: i32 = 1 + (k-1)*3 + (ihalf-1)*87  (1-based)
+                const i32 = 1 + (k - 1) * 3 + (ihalf - 1) * 87;
+                for (let ib = 0; ib <= ibmax; ib++) {
+                    // max of s2 where bit (ibmax-ib) of index is 1
+                    let max1 = -1e30, max0 = -1e30;
+                    for (let i = 0; i < nt; i++) {
+                        const bitSet = (i & (1 << (ibmax - ib))) !== 0;
+                        if (bitSet) {
+                            if (s2[i] > max1)
+                                max1 = s2[i];
+                        }
+                        else {
+                            if (s2[i] > max0)
+                                max0 = s2[i];
+                        }
+                    }
+                    const idx = i32 + ib - 1; // Convert to 0-based
+                    if (idx >= 0 && idx < N_LDPC) {
+                        const bm = max1 - max0;
+                        if (nsym === 1) {
+                            bmeta[idx] = bm;
+                            const den = Math.max(max1, max0);
+                            bmetd[idx] = den > 0 ? bm / den : 0;
+                        }
+                        else if (nsym === 2) {
+                            bmetb[idx] = bm;
+                        }
+                        else {
+                            bmetc[idx] = bm;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    normalizeBmet(bmeta);
+    normalizeBmet(bmetb);
+    normalizeBmet(bmetc);
+    normalizeBmet(bmetd);
+    const bmetrics = [bmeta, bmetb, bmetc, bmetd];
+    const scalefac = 2.83;
+    const maxosd = depth >= 3 ? 2 : depth >= 2 ? 0 : -1;
+    const apmask = new Int8Array(N_LDPC);
+    // Try 4 passes with different soft-symbol metrics (matching Fortran)
+    let result = null;
+    for (let ipass = 0; ipass < 4; ipass++) {
+        const llr = new Float64Array(N_LDPC);
+        for (let i = 0; i < N_LDPC; i++)
+            llr[i] = scalefac * bmetrics[ipass][i];
+        result = decode174_91(llr, apmask, maxosd);
+        if (result && result.nharderrors >= 0 && result.nharderrors <= 36)
+            break;
+        result = null;
+    }
+    if (!result || result.nharderrors < 0 || result.nharderrors > 36)
+        return null;
+    // Check for all-zero codeword
+    if (result.cw.every((b) => b === 0))
+        return null;
+    const message77 = result.message91.slice(0, 77);
+    // Validate message type
+    const n3v = (message77[71] << 2) | (message77[72] << 1) | message77[73];
+    const i3v = (message77[74] << 2) | (message77[75] << 1) | message77[76];
+    if (i3v > 5 || (i3v === 0 && n3v > 6))
+        return null;
+    if (i3v === 0 && n3v === 2)
+        return null;
+    // Unpack
+    const { msg, success } = unpack77(message77, book);
+    if (!success || msg.trim().length === 0)
+        return null;
+    // Estimate SNR
+    let xsig = 0;
+    let xnoi = 0;
+    const itone = getTones(result.cw);
+    for (let i = 0; i < 79; i++) {
+        xsig += s8[itone[i] * NN + i] ** 2;
+        const ios = (itone[i] + 4) % 7;
+        xnoi += s8[ios * NN + i] ** 2;
+    }
+    let snr = 0.001;
+    const arg = xsig / Math.max(xnoi, 1e-30) - 1.0;
+    if (arg > 0.1)
+        snr = arg;
+    snr = 10 * Math.log10(snr) - 27.0;
+    if (snr < -24)
+        snr = -24;
+    return { msg, freq: f1, dt: xdt, snr };
+}
+function getTones(cw) {
+    const tones = new Array(79).fill(0);
+    for (let i = 0; i < 7; i++)
+        tones[i] = COSTAS[i];
+    for (let i = 0; i < 7; i++)
+        tones[36 + i] = COSTAS[i];
+    for (let i = 0; i < 7; i++)
+        tones[72 + i] = COSTAS[i];
+    let k = 7;
+    for (let j = 1; j <= 58; j++) {
+        const i = (j - 1) * 3;
+        if (j === 30)
+            k += 7;
+        const indx = cw[i] * 4 + cw[i + 1] * 2 + cw[i + 2];
+        tones[k] = GRAY_MAP[indx];
+        k++;
+    }
+    return tones;
+}
+/**
+ * Mix f0 to baseband and decimate by NDOWN (60x) by extracting frequency bins.
+ * Identical to Fortran ft8_downsample.
+ */
+function ft8Downsample(cxRe, cxIm, f0, c1Re, c1Im) {
+    const NFFT1 = 192000;
+    const NFFT2 = 3200;
+    const df = 12000.0 / NFFT1;
+    // NSPS is imported, should be 1920
+    const baud = 12000.0 / NSPS; // 6.25
+    const i0 = Math.round(f0 / df);
+    const ft = f0 + 8.5 * baud;
+    const it = Math.min(Math.round(ft / df), NFFT1 / 2);
+    const fb = f0 - 1.5 * baud;
+    const ib = Math.max(1, Math.round(fb / df));
+    c1Re.fill(0);
+    c1Im.fill(0);
+    let k = 0;
+    for (let i = ib; i <= it; i++) {
+        if (k >= NFFT2)
+            break;
+        c1Re[k] = cxRe[i] ?? 0;
+        c1Im[k] = cxIm[i] ?? 0;
+        k++;
+    }
+    // Taper
+    const pi = Math.PI;
+    const taper = new Float64Array(101);
+    for (let i = 0; i <= 100; i++) {
+        taper[i] = 0.5 * (1.0 + Math.cos((i * pi) / 100));
+    }
+    for (let i = 0; i <= 100; i++) {
+        if (i >= NFFT2)
+            break;
+        const tap = taper[100 - i];
+        c1Re[i] = c1Re[i] * tap;
+        c1Im[i] = c1Im[i] * tap;
+    }
+    const endTap = k - 1;
+    for (let i = 0; i <= 100; i++) {
+        const idx = endTap - 100 + i;
+        if (idx >= 0 && idx < NFFT2) {
+            const tap = taper[i];
+            c1Re[idx] = c1Re[idx] * tap;
+            c1Im[idx] = c1Im[idx] * tap;
+        }
+    }
+    // CSHIFT
+    const shift = i0 - ib;
+    const tempRe = new Float64Array(NFFT2);
+    const tempIm = new Float64Array(NFFT2);
+    for (let i = 0; i < NFFT2; i++) {
+        let srcIdx = (i + shift) % NFFT2;
+        if (srcIdx < 0)
+            srcIdx += NFFT2;
+        tempRe[i] = c1Re[srcIdx];
+        tempIm[i] = c1Im[srcIdx];
+    }
+    for (let i = 0; i < NFFT2; i++) {
+        c1Re[i] = tempRe[i];
+        c1Im[i] = tempIm[i];
+    }
+    // iFFT
+    fftComplex(c1Re, c1Im, true);
+    // Scale
+    // Fortran uses 1.0/sqrt(NFFT1 * NFFT2), but our fftComplex(true) scales by 1/NFFT2
+    const scale = Math.sqrt(NFFT2 / NFFT1);
+    for (let i = 0; i < NFFT2; i++) {
+        c1Re[i] = c1Re[i] * scale;
+        c1Im[i] = c1Im[i] * scale;
+    }
+}
+function sync8d(cd0Re, cd0Im, i0, twkRe, twkIm, useTwk) {
+    const NP2 = 2812;
+    const twopi = 2 * Math.PI;
+    // Precompute Costas sync waveforms
+    const csyncRe = new Float64Array(7 * 32);
+    const csyncIm = new Float64Array(7 * 32);
+    for (let i = 0; i < 7; i++) {
+        let phi = 0;
+        const dphi = (twopi * COSTAS[i]) / 32;
+        for (let j = 0; j < 32; j++) {
+            csyncRe[i * 32 + j] = Math.cos(phi);
+            csyncIm[i * 32 + j] = Math.sin(phi);
+            phi = (phi + dphi) % twopi;
+        }
+    }
+    let sync = 0;
+    for (let i = 0; i < 7; i++) {
+        const i1 = i0 + i * 32;
+        const i2 = i1 + 36 * 32;
+        const i3 = i1 + 72 * 32;
+        for (const iStart of [i1, i2, i3]) {
+            let zRe = 0, zIm = 0;
+            if (iStart >= 0 && iStart + 31 < NP2) {
+                for (let j = 0; j < 32; j++) {
+                    let sRe = csyncRe[i * 32 + j];
+                    let sIm = csyncIm[i * 32 + j];
+                    if (useTwk && twkRe && twkIm) {
+                        const tRe = twkRe[j] * sRe - twkIm[j] * sIm;
+                        const tIm = twkRe[j] * sIm + twkIm[j] * sRe;
+                        sRe = tRe;
+                        sIm = tIm;
+                    }
+                    // Conjugate multiply: cd0 * conj(csync)
+                    const dRe = cd0Re[iStart + j];
+                    const dIm = cd0Im[iStart + j];
+                    zRe += dRe * sRe + dIm * sIm;
+                    zIm += dIm * sRe - dRe * sIm;
+                }
+            }
+            sync += zRe * zRe + zIm * zIm;
+        }
+    }
+    return sync;
+}
+function normalizeBmet(bmet) {
+    const n = bmet.length;
+    let sum = 0, sum2 = 0;
+    for (let i = 0; i < n; i++) {
+        sum += bmet[i];
+        sum2 += bmet[i] * bmet[i];
+    }
+    const avg = sum / n;
+    const avg2 = sum2 / n;
+    const variance = avg2 - avg * avg;
+    const sigma = variance > 0 ? Math.sqrt(variance) : Math.sqrt(avg2);
+    if (sigma > 0) {
+        for (let i = 0; i < n; i++)
+            bmet[i] = bmet[i] / sigma;
+    }
+}
+function resample(input, fromRate, toRate, outLen) {
+    const out = new Float64Array(outLen);
+    const ratio = fromRate / toRate;
+    for (let i = 0; i < outLen; i++) {
+        const srcIdx = i * ratio;
+        const lo = Math.floor(srcIdx);
+        const frac = srcIdx - lo;
+        const v0 = lo < input.length ? (input[lo] ?? 0) : 0;
+        const v1 = lo + 1 < input.length ? (input[lo + 1] ?? 0) : 0;
+        out[i] = v0 * (1 - frac) + v1 * frac;
+    }
+    return out;
 }
 
 /**
@@ -2323,6 +3218,8 @@ class HashCallBook {
 }
 
 exports.HashCallBook = HashCallBook;
+exports.decodeFT4 = decode$1;
 exports.decodeFT8 = decode;
-exports.encodeFT8 = encode;
+exports.encodeFT4 = encode;
+exports.encodeFT8 = encode$1;
 //# sourceMappingURL=ft8ts.cjs.map
