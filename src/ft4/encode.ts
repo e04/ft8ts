@@ -1,8 +1,13 @@
 import { encode174_91 } from "../ft8/encode.js";
 import { pack77 } from "../util/pack_jt77.js";
 import { generateFT4Waveform, type WaveformOptions } from "../util/waveform.js";
-import { COSTAS_A, COSTAS_B, COSTAS_C, COSTAS_D, GRAYMAP } from "./constants.js";
+import { GRAYMAP } from "./constants.js";
 import { xorWithScrambler } from "./scramble.js";
+
+const COSTAS_A = [0, 1, 3, 2] as const;
+const COSTAS_B = [1, 0, 2, 3] as const;
+const COSTAS_C = [2, 3, 1, 0] as const;
+const COSTAS_D = [3, 2, 0, 1] as const;
 
 /**
  * Convert FT4 LDPC codeword bits into 103 channel tones.

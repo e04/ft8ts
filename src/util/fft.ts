@@ -3,6 +3,23 @@
  * Supports real-to-complex, complex-to-complex, and inverse transforms.
  */
 
+interface Radix2Plan {
+	bitReversed: Uint32Array;
+}
+
+interface BluesteinPlan {
+	m: number;
+	chirpRe: Float64Array;
+	chirpIm: Float64Array;
+	bFftRe: Float64Array;
+	bFftIm: Float64Array;
+	aRe: Float64Array;
+	aIm: Float64Array;
+}
+
+const RADIX2_PLAN_CACHE = new Map<number, Radix2Plan>();
+const BLUESTEIN_PLAN_CACHE = new Map<string, BluesteinPlan>();
+
 export function fftComplex(re: Float64Array, im: Float64Array, inverse: boolean): void {
 	const n = re.length;
 	if (n <= 1) return;
@@ -12,9 +29,11 @@ export function fftComplex(re: Float64Array, im: Float64Array, inverse: boolean)
 		return;
 	}
 
+	const { bitReversed } = getRadix2Plan(n);
+
 	// Bit-reversal permutation
-	let j = 0;
 	for (let i = 0; i < n; i++) {
+		const j = bitReversed[i]!;
 		if (j > i) {
 			let tmp = re[i]!;
 			re[i] = re[j]!;
@@ -23,12 +42,6 @@ export function fftComplex(re: Float64Array, im: Float64Array, inverse: boolean)
 			im[i] = im[j]!;
 			im[j] = tmp;
 		}
-		let m = n >> 1;
-		while (m >= 1 && j >= m) {
-			j -= m;
-			m >>= 1;
-		}
-		j += m;
 	}
 
 	const sign = inverse ? 1 : -1;
@@ -59,62 +72,109 @@ export function fftComplex(re: Float64Array, im: Float64Array, inverse: boolean)
 	}
 
 	if (inverse) {
+		const scale = 1 / n;
 		for (let i = 0; i < n; i++) {
-			re[i]! /= n;
-			im[i]! /= n;
+			re[i] = re[i]! * scale;
+			im[i] = im[i]! * scale;
 		}
 	}
 }
 
 function bluestein(re: Float64Array, im: Float64Array, inverse: boolean): void {
 	const n = re.length;
-	const m = nextPow2(n * 2 - 1);
-	const s = inverse ? 1 : -1;
+	const { m, chirpRe, chirpIm, bFftRe, bFftIm, aRe, aIm } = getBluesteinPlan(n, inverse);
 
-	const aRe = new Float64Array(m);
-	const aIm = new Float64Array(m);
-	const bRe = new Float64Array(m);
-	const bIm = new Float64Array(m);
-
+	aRe.fill(0);
+	aIm.fill(0);
 	for (let i = 0; i < n; i++) {
-		const angle = (s * Math.PI * ((i * i) % (2 * n))) / n;
-		const cosA = Math.cos(angle);
-		const sinA = Math.sin(angle);
-
-		aRe[i] = re[i]! * cosA - im[i]! * sinA;
-		aIm[i] = re[i]! * sinA + im[i]! * cosA;
-
-		bRe[i] = cosA;
-		bIm[i] = -sinA;
-	}
-	for (let i = 1; i < n; i++) {
-		bRe[m - i] = bRe[i]!;
-		bIm[m - i] = bIm[i]!;
+		const cosA = chirpRe[i]!;
+		const sinA = chirpIm[i]!;
+		const inRe = re[i]!;
+		const inIm = im[i]!;
+		aRe[i] = inRe * cosA - inIm * sinA;
+		aIm[i] = inRe * sinA + inIm * cosA;
 	}
 
 	fftComplex(aRe, aIm, false);
-	fftComplex(bRe, bIm, false);
 
 	for (let i = 0; i < m; i++) {
-		const r = aRe[i]! * bRe[i]! - aIm[i]! * bIm[i]!;
-		const iIm = aRe[i]! * bIm[i]! + aIm[i]! * bRe[i]!;
-		aRe[i] = r;
-		aIm[i] = iIm;
+		const ar = aRe[i]!;
+		const ai = aIm[i]!;
+		const br = bFftRe[i]!;
+		const bi = bFftIm[i]!;
+		aRe[i] = ar * br - ai * bi;
+		aIm[i] = ar * bi + ai * br;
 	}
 
 	fftComplex(aRe, aIm, true);
 
 	const scale = inverse ? 1 / n : 1;
 	for (let i = 0; i < n; i++) {
-		const angle = (s * Math.PI * ((i * i) % (2 * n))) / n;
-		const cosA = Math.cos(angle);
-		const sinA = Math.sin(angle);
+		const cosA = chirpRe[i]!;
+		const sinA = chirpIm[i]!;
 
 		const r = aRe[i]! * cosA - aIm[i]! * sinA;
 		const iIm = aRe[i]! * sinA + aIm[i]! * cosA;
 		re[i] = r * scale;
 		im[i] = iIm * scale;
 	}
+}
+
+function getRadix2Plan(n: number): Radix2Plan {
+	let plan = RADIX2_PLAN_CACHE.get(n);
+	if (plan) return plan;
+
+	const bits = 31 - Math.clz32(n);
+	const bitReversed = new Uint32Array(n);
+	for (let i = 1; i < n; i++) {
+		bitReversed[i] = (bitReversed[i >> 1]! >> 1) | ((i & 1) << (bits - 1));
+	}
+
+	plan = { bitReversed };
+	RADIX2_PLAN_CACHE.set(n, plan);
+	return plan;
+}
+
+function getBluesteinPlan(n: number, inverse: boolean): BluesteinPlan {
+	const key = `${n}:${inverse ? 1 : 0}`;
+	const cached = BLUESTEIN_PLAN_CACHE.get(key);
+	if (cached) return cached;
+
+	const m = nextPow2(n * 2 - 1);
+	const s = inverse ? 1 : -1;
+	const chirpRe = new Float64Array(n);
+	const chirpIm = new Float64Array(n);
+	for (let i = 0; i < n; i++) {
+		const angle = (s * Math.PI * ((i * i) % (2 * n))) / n;
+		chirpRe[i] = Math.cos(angle);
+		chirpIm[i] = Math.sin(angle);
+	}
+
+	const bFftRe = new Float64Array(m);
+	const bFftIm = new Float64Array(m);
+	for (let i = 0; i < n; i++) {
+		const cosA = chirpRe[i]!;
+		const sinA = chirpIm[i]!;
+		bFftRe[i] = cosA;
+		bFftIm[i] = -sinA;
+	}
+	for (let i = 1; i < n; i++) {
+		bFftRe[m - i] = bFftRe[i]!;
+		bFftIm[m - i] = bFftIm[i]!;
+	}
+	fftComplex(bFftRe, bFftIm, false);
+
+	const plan: BluesteinPlan = {
+		m,
+		chirpRe,
+		chirpIm,
+		bFftRe,
+		bFftIm,
+		aRe: new Float64Array(m),
+		aIm: new Float64Array(m),
+	};
+	BLUESTEIN_PLAN_CACHE.set(key, plan);
+	return plan;
 }
 
 /**

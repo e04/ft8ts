@@ -3,9 +3,7 @@
 export const SAMPLE_RATE = 12_000;
 
 /** LDPC(174,91) code (shared by FT8 and FT4). */
-export const KK = 91;
 export const N_LDPC = 174;
-export const M_LDPC = N_LDPC - KK; // 83
 
 export const gHex = [
 	"8329ce11bf31eaf509f27fc",
@@ -92,8 +90,6 @@ export const gHex = [
 	"2644ebadeb44b9467d1f42c",
 	"608cc857594bfbb55d69600",
 ];
-
-export const CRC_POLY = 0x2757;
 
 export const FTALPH = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ+-./?";
 

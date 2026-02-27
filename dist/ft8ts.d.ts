@@ -83,6 +83,7 @@ interface WaveformOptions {
     samplesPerSymbol?: number;
     bt?: number;
     baseFrequency?: number;
+    initialPhase?: number;
 }
 
 declare function encode$1(msg: string, options?: WaveformOptions): Float32Array;
