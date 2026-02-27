@@ -3,10 +3,8 @@ const FT8_DEFAULT_SAMPLE_RATE = 12_000;
 const FT8_DEFAULT_SAMPLES_PER_SYMBOL = 1_920;
 const FT8_DEFAULT_BT = 2.0;
 
-import { NSPS as FT4_NSPS } from "../ft4/constants.js";
-
 const FT4_DEFAULT_SAMPLE_RATE = 12_000;
-const FT4_DEFAULT_SAMPLES_PER_SYMBOL = FT4_NSPS;
+const FT4_DEFAULT_SAMPLES_PER_SYMBOL = 576;
 const FT4_DEFAULT_BT = 1.0;
 const MODULATION_INDEX = 1.0;
 
@@ -15,6 +13,7 @@ export interface WaveformOptions {
 	samplesPerSymbol?: number;
 	bt?: number;
 	baseFrequency?: number;
+	initialPhase?: number;
 }
 
 interface WaveformDefaults {
@@ -68,12 +67,16 @@ function generateGfskWaveform(
 	const nsps = options.samplesPerSymbol ?? defaults.samplesPerSymbol;
 	const bt = options.bt ?? defaults.bt;
 	const f0 = options.baseFrequency ?? 0;
+	const initialPhase = options.initialPhase ?? 0;
 
 	assertPositiveFinite(sampleRate, "sampleRate");
 	assertPositiveFinite(nsps, "samplesPerSymbol");
 	assertPositiveFinite(bt, "bt");
 	if (!Number.isFinite(f0)) {
 		throw new Error("baseFrequency must be finite");
+	}
+	if (!Number.isFinite(initialPhase)) {
+		throw new Error("initialPhase must be finite");
 	}
 	if (!Number.isInteger(nsps)) {
 		throw new Error("samplesPerSymbol must be an integer");
@@ -111,7 +114,8 @@ function generateGfskWaveform(
 	}
 
 	const wave = new Float32Array(nwave);
-	let phi = 0;
+	let phi = initialPhase % TWO_PI;
+	if (phi < 0) phi += TWO_PI;
 	const phaseStart = shape.includeRampSymbols ? 0 : nsps;
 	for (let k = 0; k < nwave; k++) {
 		const j = phaseStart + k;

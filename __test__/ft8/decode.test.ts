@@ -71,7 +71,7 @@ describe("WAV decode: 190227_155815.wav", () => {
 		const wavPath = join(__dirname, "190227_155815.wav");
 		const buf = readFileSync(wavPath);
 		const { sampleRate, samples } = parseWavBuffer(buf);
-		const decoded = decode(samples, { sampleRate });
+		const decoded = decode(samples, { sampleRate, depth: 3 });
 
 		expect(decoded.length).toBeGreaterThanOrEqual(27);
 	}, 15_000);
@@ -81,12 +81,12 @@ describe("WAV decode: 190227_155815.wav", () => {
   Downloaded from: https://sourceforge.net/projects/wsjt/files/samples/FT8/210703_133430.wav/download
 */
 describe("WAV decode: 210703_133430.wav", () => {
-	test("decodes at least 13 messages matching expected results", () => {
+	test("decodes at least 16 messages matching expected results", () => {
 		const wavPath = join(__dirname, "210703_133430.wav");
 		const buf = readFileSync(wavPath);
 		const { sampleRate, samples } = parseWavBuffer(buf);
-		const decoded = decode(samples, { sampleRate });
+		const decoded = decode(samples, { sampleRate, depth: 3 });
 
-		expect(decoded.length).toBeGreaterThanOrEqual(13);
+		expect(decoded.length).toBeGreaterThanOrEqual(16);
 	}, 15_000);
 });

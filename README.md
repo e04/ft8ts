@@ -30,29 +30,30 @@ npx @e04/ft8ts encode "CQ JK1IFA PM95" [--out output.wav] [--df 1000]
 
 The benchmark below was compiled with reference to [Comparing PyFT8 with WSJT-x and FT8_lib](https://www.reddit.com/r/amateurradio/comments/1qt27ss/comparing_pyft8_with_wsjtx_and_ft8_lib/).
 
-| Call a | Call b | Message | WSJT-x(default) | WSJT-x (fast) | [PyFT8](https://github.com/G1OJS/PyFT8) | [ft8_lib](https://github.com/kgoba/ft8_lib) | ft8ts (depth=1) | ft8ts (depth=2) | ft8ts (depth=3) |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| W1FC | F5BZB | -8 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| WM3PEN | EA6VQ | -9 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| CQ | F5RXL | IN94 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| N1JFU | EA6EE | R-07 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| A92EE | F5PSR | -14 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| K1BZM | EA3GP | -9 | ☑️ | ☑️ | ☑️ | | ☑️ | ☑️ | ☑️ |
-| W0RSJ | EA3BMU | RR73 | ☑️ | ☑️ | ☑️ | | ☑️ | ☑️ | ☑️ |
-| K1JT | HA0DU | KN07 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| W1DIG | SV9CVY | -14 | ☑️ | ☑️ | ☑️ | | ☑️ | ☑️ | ☑️ |
-| K1JT | EA3AGB | -15 | ☑️ | ☑️ | ☑️ | | ☑️ | ☑️ | ☑️ |
-| XE2X | HA2NP | RR73 | ☑️ | ☑️ | ☑️ | ☑️ | | | ☑️ |
-| N1PJT | HB9CQK | -10 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| K1BZM | EA3CJ | JN01 | ☑️ | ☑️ | | | | | |
-| KD2UGC | F6GCP | R-23 | ☑️ | ☑️ | | | | | |
-| WA2FZW | DL5AXX | RR73 | ☑️ | | | | | | |
-| N1API | HA6FQ | -23 | ☑️ | | | | | ☑️ | ☑️ |
-| N1API | F2VX | 73 | ☑️ | | | | | | |
-| K1JT | HA5WA | 73 | ☑️ | | | | | ☑️ | ☑️ |
-| CQ | EA2BFM | IN83 | ☑️ | | | | | | |
+| Call a | Call b | Message | WSJT-x(default) | WSJT-x (fast) | [PyFT8](https://github.com/G1OJS/PyFT8) | [ft8_lib](https://github.com/kgoba/ft8_lib) | ft8ts (depth=3) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| W1FC | F5BZB | -8 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| WM3PEN | EA6VQ | -9 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| CQ | F5RXL | IN94 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| N1JFU | EA6EE | R-07 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| A92EE | F5PSR | -14 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| K1BZM | EA3GP | -9 | ☑️ | ☑️ | ☑️ | | ☑️ |
+| W0RSJ | EA3BMU | RR73 | ☑️ | ☑️ | ☑️ | | ☑️ |
+| K1JT | HA0DU | KN07 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| W1DIG | SV9CVY | -14 | ☑️ | ☑️ | ☑️ | | ☑️ |
+| K1JT | EA3AGB | -15 | ☑️ | ☑️ | ☑️ | | ☑️ |
+| XE2X | HA2NP | RR73 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| N1PJT | HB9CQK | -10 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| K1BZM | EA3CJ | JN01 | ☑️ | ☑️ | | | |
+| KD2UGC | F6GCP | R-23 | ☑️ | ☑️ | | | |
+| WA2FZW | DL5AXX | RR73 | ☑️ | | | | |
+| N1API | HA6FQ | -23 | ☑️ | | | | ☑️ |
+| N1API | F2VX | 73 | ☑️ | | | | ☑️ |
+| K1JT | HA5WA | 73 | ☑️ | | | | ☑️ |
+| CQ | EA2BFM | IN83 | ☑️ | | | | |
+| K1BZM | DK8NE | -10 | | | | | ☑️ |
 
-At its maximum depth mode (Depth 3), it successfully decodes 14 messages, outperforming both `PyFT8` (12) and `FT8_lib` (8), and matching the total message count of `WSJT-x FAST mode`.
+At its maximum depth mode (Depth 3), it successfully decodes 16 messages on this sample (including 16/20 rows in the table above), outperforming both `PyFT8` (12), `FT8_lib` (8), and `WSJT-x FAST mode` (14).
 
 ## Installation
 

@@ -26,6 +26,7 @@ Decode options:
   --low <hz>     Lower frequency bound (default: 200)
   --high <hz>    Upper frequency bound (default: 3000)
   --depth <1|2|3>  Decoding depth (default: 2)
+  --max-candidates <n>  Max candidate signals to decode (default: 300)
 
 Encode options:
   --out <file>   Output WAV file (default: output.wav)
@@ -66,6 +67,8 @@ function runDecode(argv: string[]): void {
 			options.freqHigh = Number(argv[++i]);
 		} else if (arg === "--depth") {
 			options.depth = Number(argv[++i]);
+		} else if (arg === "--max-candidates") {
+			options.maxCandidates = Number(argv[++i]);
 		} else {
 			throw new Error(`Unknown argument: ${arg}`);
 		}

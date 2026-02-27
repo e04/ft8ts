@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
-import { NMAX } from "../../src/ft4/constants.js";
 import { decode } from "../../src/ft4/decode.js";
 import { encode } from "../../src/ft4/encode.js";
 import { parseWavBuffer } from "../../src/util/wav.js";
@@ -12,6 +11,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const SAMPLE_RATE = 12_000;
 const BASE_FREQ = 1_000;
+const NMAX = 21 * 3456; // FT4 decode window length (72576 samples)
 
 describe("FT4 All Message Types (ft4_testmsg.f90)", () => {
 	test.each(ROUND_TRIP_MESSAGES)('encode then decode: "%s"', (msg) => {

@@ -3,9 +3,12 @@
  * Port of bpdecode174_91.f90 and decode174_91.f90.
  */
 
-import { gHex, KK, M_LDPC, N_LDPC } from "./constants.js";
+import { gHex, N_LDPC } from "./constants.js";
 import { checkCRC14 } from "./crc.js";
 import { Mn, Nm, ncw, nrw } from "./ldpc_tables.js";
+
+const KK = 91;
+const M_LDPC = N_LDPC - KK; // 83
 
 export interface DecodeResult {
 	message91: number[];
@@ -183,39 +186,48 @@ function osdDecode174_91(
 	const K = KK;
 
 	const gen = getGenerator();
+	const absllr = new Float64Array(N);
+	for (let i = 0; i < N; i++) absllr[i] = Math.abs(llr[i]!);
 
 	// Sort by reliability (descending)
-	const indices = Array.from({ length: N }, (_, i) => i);
-	indices.sort((a, b) => Math.abs(llr[b]!) - Math.abs(llr[a]!));
+	const indices = new Array<number>(N);
+	for (let i = 0; i < N; i++) indices[i] = i;
+	indices.sort((a, b) => absllr[b]! - absllr[a]!);
 
 	// Reorder generator matrix columns
 	const genmrb = new Uint8Array(K * N);
-	for (let i = 0; i < N; i++) {
-		for (let k = 0; k < K; k++) {
-			genmrb[k * N + i] = gen[k * N + indices[i]!]!;
+	for (let k = 0; k < K; k++) {
+		const row = k * N;
+		for (let i = 0; i < N; i++) {
+			genmrb[row + i] = gen[row + indices[i]!]!;
 		}
 	}
 
 	// Gaussian elimination to get systematic form on the K most-reliable bits
+	const maxPivotCol = Math.min(K + 20, N);
 	for (let id = 0; id < K; id++) {
 		let found = false;
-		for (let icol = id; icol < Math.min(K + 20, N); icol++) {
-			if (genmrb[id * N + icol] === 1) {
+		const idRow = id * N;
+		for (let icol = id; icol < maxPivotCol; icol++) {
+			if (genmrb[idRow + icol] === 1) {
 				if (icol !== id) {
 					// Swap columns
 					for (let k = 0; k < K; k++) {
-						const tmp = genmrb[k * N + id]!;
-						genmrb[k * N + id] = genmrb[k * N + icol]!;
-						genmrb[k * N + icol] = tmp;
+						const row = k * N;
+						const tmp = genmrb[row + id]!;
+						genmrb[row + id] = genmrb[row + icol]!;
+						genmrb[row + icol] = tmp;
 					}
 					const tmp = indices[id]!;
 					indices[id] = indices[icol]!;
 					indices[icol] = tmp;
 				}
 				for (let ii = 0; ii < K; ii++) {
-					if (ii !== id && genmrb[ii * N + id] === 1) {
+					if (ii === id) continue;
+					const iiRow = ii * N;
+					if (genmrb[iiRow + id] === 1) {
 						for (let c = 0; c < N; c++) {
-							genmrb[ii * N + c]! ^= genmrb[id * N + c]!;
+							genmrb[iiRow + c]! ^= genmrb[idRow + c]!;
 						}
 					}
 				}
@@ -229,84 +241,79 @@ function osdDecode174_91(
 	// Hard decisions on reordered received word
 	const hdec = new Int8Array(N);
 	for (let i = 0; i < N; i++) {
-		hdec[i] = llr[indices[i]!]! >= 0 ? 1 : 0;
+		const idx = indices[i]!;
+		hdec[i] = llr[idx]! >= 0 ? 1 : 0;
 	}
 	const absrx = new Float64Array(N);
 	for (let i = 0; i < N; i++) {
-		absrx[i] = Math.abs(llr[indices[i]!]!);
+		absrx[i] = absllr[indices[i]!]!;
 	}
 
-	// Transpose of reordered gen matrix
-	const g2 = new Uint8Array(N * K);
+	// Encode hard decision on MRB (c0): xor selected rows of genmrb.
+	const c0 = new Int8Array(N);
 	for (let i = 0; i < K; i++) {
+		if (hdec[i] !== 1) continue;
+		const row = i * N;
 		for (let j = 0; j < N; j++) {
-			g2[j * K + i] = genmrb[i * N + j]!;
+			c0[j]! ^= genmrb[row + j]!;
 		}
 	}
 
-	function mrbencode(me: Int8Array): Int8Array {
-		const codeword = new Int8Array(N);
-		for (let i = 0; i < K; i++) {
-			if (me[i] === 1) {
-				for (let j = 0; j < N; j++) {
-					codeword[j]! ^= g2[j * K + i]!;
-				}
-			}
-		}
-		return codeword;
-	}
-
-	const m0 = hdec.slice(0, K);
-	const c0 = mrbencode(m0);
-	const bestCw = new Int8Array(c0);
 	let dmin = 0;
 	for (let i = 0; i < N; i++) {
 		const x = c0[i]! ^ hdec[i]!;
 		dmin += x * absrx[i]!;
 	}
+	let bestFlip1 = -1;
+	let bestFlip2 = -1;
 
 	// Order-1: flip single bits in the info portion
 	for (let i1 = K - 1; i1 >= 0; i1--) {
 		if (apmask[indices[i1]!] === 1) continue;
-		const me = new Int8Array(m0);
-		me[i1]! ^= 1;
-		const ce = mrbencode(me);
-		let _nh = 0;
+		const row1 = i1 * N;
 		let dd = 0;
 		for (let j = 0; j < N; j++) {
-			const x = ce[j]! ^ hdec[j]!;
-			_nh += x;
+			const x = c0[j]! ^ genmrb[row1 + j]! ^ hdec[j]!;
 			dd += x * absrx[j]!;
 		}
 		if (dd < dmin) {
 			dmin = dd;
-			bestCw.set(ce);
+			bestFlip1 = i1;
+			bestFlip2 = -1;
 		}
 	}
 
 	// Order-2: flip pairs of least-reliable info bits (limited search)
 	if (norder >= 2) {
-		const ntry = Math.min(40, K);
-		for (let i1 = K - 1; i1 >= K - ntry; i1--) {
+		const ntry = Math.min(64, K);
+		const iMin = Math.max(0, K - ntry);
+		for (let i1 = K - 1; i1 >= iMin; i1--) {
 			if (apmask[indices[i1]!] === 1) continue;
-			for (let i2 = i1 - 1; i2 >= K - ntry; i2--) {
+			const row1 = i1 * N;
+			for (let i2 = i1 - 1; i2 >= iMin; i2--) {
 				if (apmask[indices[i2]!] === 1) continue;
-				const me = new Int8Array(m0);
-				me[i1]! ^= 1;
-				me[i2]! ^= 1;
-				const ce = mrbencode(me);
-				let _nh = 0;
+				const row2 = i2 * N;
 				let dd = 0;
 				for (let j = 0; j < N; j++) {
-					const x = ce[j]! ^ hdec[j]!;
-					_nh += x;
+					const x = c0[j]! ^ genmrb[row1 + j]! ^ genmrb[row2 + j]! ^ hdec[j]!;
 					dd += x * absrx[j]!;
 				}
 				if (dd < dmin) {
 					dmin = dd;
-					bestCw.set(ce);
+					bestFlip1 = i1;
+					bestFlip2 = i2;
 				}
 			}
+		}
+	}
+
+	const bestCw = new Int8Array(c0);
+	if (bestFlip1 >= 0) {
+		const row1 = bestFlip1 * N;
+		for (let j = 0; j < N; j++) bestCw[j]! ^= genmrb[row1 + j]!;
+		if (bestFlip2 >= 0) {
+			const row2 = bestFlip2 * N;
+			for (let j = 0; j < N; j++) bestCw[j]! ^= genmrb[row2 + j]!;
 		}
 	}
 
@@ -321,13 +328,12 @@ function osdDecode174_91(
 
 	// Compute dmin in original order
 	let dminOrig = 0;
-	const hdecOrig = new Int8Array(N);
-	for (let i = 0; i < N; i++) hdecOrig[i] = llr[i]! >= 0 ? 1 : 0;
 	let nhe = 0;
 	for (let i = 0; i < N; i++) {
-		const x = finalCw[i]! ^ hdecOrig[i]!;
+		const hard = llr[i]! >= 0 ? 1 : 0;
+		const x = finalCw[i]! ^ hard;
 		nhe += x;
-		dminOrig += x * Math.abs(llr[i]!);
+		dminOrig += x * absllr[i]!;
 	}
 
 	return {

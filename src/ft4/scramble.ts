@@ -1,4 +1,9 @@
-import { RVEC } from "./constants.js";
+// Message scrambling vector (rvec) from WSJT-X.
+const RVEC = [
+	0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 1,
+	0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0,
+	1, 1, 1, 1, 1, 0, 0, 0, 1, 0, 1,
+] as const;
 
 export function xorWithScrambler(bits77: readonly number[]): number[] {
 	const out = new Array<number>(77);
