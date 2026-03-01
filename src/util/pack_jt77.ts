@@ -154,7 +154,6 @@ function parseCallsign(raw: string): {
 		iarea <= 2 && // Fortran: iarea (1-indexed) must be 2 or 3 → 0-indexed: 1 or 2
 		nplet >= 1 && // at least one letter before area digit
 		npdig < iarea && // not all digits before area
-		nslet >= 1 && // must have at least one letter after area digit
 		nslet <= 3; // at most 3 suffix letters
 
 	return { basecall: call, isStandard: standard, suffix };
@@ -200,7 +199,20 @@ function pack28(token: string): number {
 	// Standard callsign
 	const { basecall, isStandard } = parseCallsign(t);
 	if (isStandard) {
-		const cs = basecall.length === 5 ? ` ${basecall}` : basecall;
+		// Fortran pack28 layout:
+		//   iarea==2 (0-based 1): callsign=' '//c13(1:5)
+		//   iarea==3 (0-based 2): callsign=     c13(1:6)
+		let iareaD = -1;
+		for (let ii = basecall.length - 1; ii >= 1; ii--) {
+			const c = basecall[ii] ?? "";
+			if (c >= "0" && c <= "9") {
+				iareaD = ii;
+				break;
+			}
+		}
+		let cs = basecall;
+		if (iareaD === 1) cs = ` ${basecall.slice(0, 5)}`;
+		if (iareaD === 2) cs = basecall.slice(0, 6);
 		const i1 = A1.indexOf(cs[0] ?? " ");
 		const i2 = A2.indexOf(cs[1] ?? "0");
 		const i3 = A3.indexOf(cs[2] ?? "0");
