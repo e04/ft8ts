@@ -141,6 +141,12 @@ GPL-3.0
 
 ## Related Projects
 
-- **[PyFT8](https://github.com/G1OJS/PyFT8)** — Python implementation.
-- **[ft8_lib](https://github.com/kgoba/ft8_lib)** — C++ implementation.
+- **[PyFT8](https://github.com/G1OJS/PyFT8)** — A pure Python implementation of an FT8 encoder and decoder.
+
+- **[ft8_lib](https://github.com/kgoba/ft8_lib)** — A lightweight C implementation of an FT8 and FT4 encoder and decoder.
+
+- **[wsjtx_lib](https://github.com/paulh002/wsjtx_lib)** — A C++ library that wraps the original WSJT-X Fortran source code.
+
+- **[wsjtx-lib-nodejs](https://github.com/boybook/wsjtx_lib_nodejs)** — A Node.js native C++ extension and TypeScript wrapper for `wsjtx_lib`.
+
 - **[ft8js](https://github.com/e04/ft8js)** - My previous experimental project using WebAssembly (WASM) with ft8_lib.
