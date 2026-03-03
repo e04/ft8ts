@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,4 +27,25 @@ jobs:
 
       - run: npm test -- --run
 
-      - run: npm publish --access public
+      - run: npm pack
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: "*.tgz"
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+
+      - run: npm publish ./*.tgz --access public
