@@ -104,7 +104,7 @@ interface DecodeOptions {
     freqHigh?: number;
     /** Minimum sync threshold, default 1.3 */
     syncMin?: number;
-    /** Decoding depth: 1=fast BP only, 2=BP+OSD, 3=deep */
+    /** Decoding depth: 1=fast BP only, 2=BP+OSD, 3=deep, 4=deeper AP/OSD */
     depth?: number;
     /** Maximum candidates to process */
     maxCandidates?: number;

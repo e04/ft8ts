@@ -166,7 +166,7 @@ export function decode174_91(
 
 	// OSD-0 fallback: try hard-decision with bit flipping for most unreliable bits
 	if (maxosd >= 0) {
-		return osdDecode174_91(llr, apmask, maxosd >= 1 ? 2 : 1);
+		return osdDecode174_91(llr, apmask, maxosd >= 2 ? 3 : maxosd >= 1 ? 2 : 1);
 	}
 
 	return null;
@@ -266,6 +266,7 @@ function osdDecode174_91(
 	}
 	let bestFlip1 = -1;
 	let bestFlip2 = -1;
+	let bestFlip3 = -1;
 
 	// Order-1: flip single bits in the info portion
 	for (let i1 = K - 1; i1 >= 0; i1--) {
@@ -280,6 +281,7 @@ function osdDecode174_91(
 			dmin = dd;
 			bestFlip1 = i1;
 			bestFlip2 = -1;
+			bestFlip3 = -1;
 		}
 	}
 
@@ -302,6 +304,35 @@ function osdDecode174_91(
 					dmin = dd;
 					bestFlip1 = i1;
 					bestFlip2 = i2;
+					bestFlip3 = -1;
+				}
+			}
+		}
+	}
+
+	if (norder >= 3) {
+		const ntry = Math.min(40, K);
+		const iMin = Math.max(0, K - ntry);
+		for (let i1 = K - 1; i1 >= iMin; i1--) {
+			if (apmask[indices[i1]!] === 1) continue;
+			const row1 = i1 * N;
+			for (let i2 = i1 - 1; i2 >= iMin; i2--) {
+				if (apmask[indices[i2]!] === 1) continue;
+				const row2 = i2 * N;
+				for (let i3 = i2 - 1; i3 >= iMin; i3--) {
+					if (apmask[indices[i3]!] === 1) continue;
+					const row3 = i3 * N;
+					let dd = 0;
+					for (let j = 0; j < N; j++) {
+						const x = c0[j]! ^ genmrb[row1 + j]! ^ genmrb[row2 + j]! ^ genmrb[row3 + j]! ^ hdec[j]!;
+						dd += x * absrx[j]!;
+					}
+					if (dd < dmin) {
+						dmin = dd;
+						bestFlip1 = i1;
+						bestFlip2 = i2;
+						bestFlip3 = i3;
+					}
 				}
 			}
 		}
@@ -314,6 +345,10 @@ function osdDecode174_91(
 		if (bestFlip2 >= 0) {
 			const row2 = bestFlip2 * N;
 			for (let j = 0; j < N; j++) bestCw[j]! ^= genmrb[row2 + j]!;
+		}
+		if (bestFlip3 >= 0) {
+			const row3 = bestFlip3 * N;
+			for (let j = 0; j < N; j++) bestCw[j]! ^= genmrb[row3 + j]!;
 		}
 	}
 

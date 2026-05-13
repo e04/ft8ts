@@ -363,7 +363,7 @@ function decode174_91(llr, apmask, maxosd) {
         return bpResult;
     // OSD-0 fallback: try hard-decision with bit flipping for most unreliable bits
     if (maxosd >= 0) {
-        return osdDecode174_91(llr, apmask, maxosd >= 1 ? 2 : 1);
+        return osdDecode174_91(llr, apmask, maxosd >= 2 ? 3 : maxosd >= 1 ? 2 : 1);
     }
     return null;
 }
@@ -455,6 +455,7 @@ function osdDecode174_91(llr, apmask, norder) {
     }
     let bestFlip1 = -1;
     let bestFlip2 = -1;
+    let bestFlip3 = -1;
     // Order-1: flip single bits in the info portion
     for (let i1 = K - 1; i1 >= 0; i1--) {
         if (apmask[indices[i1]] === 1)
@@ -469,6 +470,7 @@ function osdDecode174_91(llr, apmask, norder) {
             dmin = dd;
             bestFlip1 = i1;
             bestFlip2 = -1;
+            bestFlip3 = -1;
         }
     }
     // Order-2: flip pairs of least-reliable info bits (limited search)
@@ -492,6 +494,37 @@ function osdDecode174_91(llr, apmask, norder) {
                     dmin = dd;
                     bestFlip1 = i1;
                     bestFlip2 = i2;
+                    bestFlip3 = -1;
+                }
+            }
+        }
+    }
+    if (norder >= 3) {
+        const ntry = Math.min(40, K);
+        const iMin = Math.max(0, K - ntry);
+        for (let i1 = K - 1; i1 >= iMin; i1--) {
+            if (apmask[indices[i1]] === 1)
+                continue;
+            const row1 = i1 * N;
+            for (let i2 = i1 - 1; i2 >= iMin; i2--) {
+                if (apmask[indices[i2]] === 1)
+                    continue;
+                const row2 = i2 * N;
+                for (let i3 = i2 - 1; i3 >= iMin; i3--) {
+                    if (apmask[indices[i3]] === 1)
+                        continue;
+                    const row3 = i3 * N;
+                    let dd = 0;
+                    for (let j = 0; j < N; j++) {
+                        const x = c0[j] ^ genmrb[row1 + j] ^ genmrb[row2 + j] ^ genmrb[row3 + j] ^ hdec[j];
+                        dd += x * absrx[j];
+                    }
+                    if (dd < dmin) {
+                        dmin = dd;
+                        bestFlip1 = i1;
+                        bestFlip2 = i2;
+                        bestFlip3 = i3;
+                    }
                 }
             }
         }
@@ -505,6 +538,11 @@ function osdDecode174_91(llr, apmask, norder) {
             const row2 = bestFlip2 * N;
             for (let j = 0; j < N; j++)
                 bestCw[j] ^= genmrb[row2 + j];
+        }
+        if (bestFlip3 >= 0) {
+            const row3 = bestFlip3 * N;
+            for (let j = 0; j < N; j++)
+                bestCw[j] ^= genmrb[row3 + j];
         }
     }
     // Reorder codeword back to original order
@@ -2560,9 +2598,13 @@ const TAPER_SIZE = 101;
 const TAPER_LAST = TAPER_SIZE - 1;
 const TWO_PI = 2 * Math.PI;
 const MAX_DECODE_PASSES_DEPTH3 = 2;
+const MAX_DECODE_PASSES_DEPTH4 = 3;
 const SUBTRACTION_GAIN = 0.95;
 const SUBTRACTION_PHASE_SHIFT = Math.PI / 2;
 const MIN_SUBTRACTION_SNR = -22;
+const CQ_AP_BITS = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0,
+];
 const FS2 = SAMPLE_RATE / NDOWN;
 const DT2 = 1.0 / FS2;
 const DOWNSAMPLE_DF = SAMPLE_RATE / NFFT1_LONG;
@@ -2593,7 +2635,7 @@ function decode(samples, options = {}) {
     const toneCache = new Map();
     const decoded = [];
     const seenMessages = new Set();
-    const maxPasses = depth >= 3 ? MAX_DECODE_PASSES_DEPTH3 : 1;
+    const maxPasses = depth >= 4 ? MAX_DECODE_PASSES_DEPTH4 : depth >= 3 ? MAX_DECODE_PASSES_DEPTH3 : 1;
     for (let pass = 0; pass < maxPasses; pass++) {
         cxRe.fill(0);
         cxIm.fill(0);
@@ -2657,6 +2699,8 @@ function createDecodeWorkspace() {
         llr: new Float64Array(N_LDPC),
         apmask: new Int8Array(N_LDPC),
         ss: new Float64Array(9),
+        fallbackRe: new Float64Array(NFFT2),
+        fallbackIm: new Float64Array(NFFT2),
     };
 }
 function copySamplesToDecodeWindow(samples) {
@@ -2827,12 +2871,28 @@ function computeBaseline(savg, nfa, nfb, df, nh1) {
 }
 function ft8b(_dd0, cxRe, cxIm, f1, xdt, _sbase, depth, book, workspace, coarseDownsampleCache, coarseFrequencyUses) {
     loadCoarseDownsample(cxRe, cxIm, f1, workspace, coarseDownsampleCache, coarseFrequencyUses);
-    let ibest = findBestTimeOffset(workspace.cd0Re, workspace.cd0Im, xdt);
+    const ibest = findBestTimeOffset(workspace.cd0Re, workspace.cd0Im, xdt);
     const delfbest = findBestFrequencyShift(workspace.cd0Re, workspace.cd0Im, ibest);
+    workspace.fallbackRe.set(workspace.cd0Re);
+    workspace.fallbackIm.set(workspace.cd0Im);
     f1 += delfbest;
     ft8Downsample(cxRe, cxIm, f1, workspace);
-    ibest = refineTimeOffset(workspace.cd0Re, workspace.cd0Im, ibest, workspace.ss);
-    xdt = (ibest - 1) * DT2;
+    let result = tryDecodeAtCurrentOffset(f1, ibest, depth, book, workspace);
+    if (result)
+        return result;
+    if (depth < 4)
+        return null;
+    workspace.cd0Re.set(workspace.fallbackRe);
+    workspace.cd0Im.set(workspace.fallbackIm);
+    shiftDownsampledFrequency(workspace.cd0Re, workspace.cd0Im, -delfbest);
+    result = tryDecodeAtCurrentOffset(f1, ibest, depth, book, workspace);
+    if (result)
+        return result;
+    return null;
+}
+function tryDecodeAtCurrentOffset(freq, ibest0, depth, book, workspace) {
+    const ibest = refineTimeOffset(workspace.cd0Re, workspace.cd0Im, ibest0, workspace.ss);
+    const xdt = (depth >= 4 ? ibest : ibest - 1) * DT2;
     extractSoftSymbols(workspace.cd0Re, workspace.cd0Im, ibest, workspace);
     const minCostasHits = depth >= 3 ? 6 : 7;
     if (!passesSyncGate(workspace.s8, minCostasHits))
@@ -2850,7 +2910,7 @@ function ft8b(_dd0, cxRe, cxIm, f1, xdt, _sbase, depth, book, workspace, coarseD
     if (!success || msg.trim().length === 0)
         return null;
     const snr = estimateSnr(workspace.s8, result.cw);
-    return { msg, freq: f1, dt: xdt, snr };
+    return { msg, freq, dt: xdt, snr };
 }
 function loadCoarseDownsample(cxRe, cxIm, f0, workspace, coarseDownsampleCache, coarseFrequencyUses) {
     const cached = coarseDownsampleCache.get(f0);
@@ -2915,6 +2975,21 @@ function refineTimeOffset(cd0Re, cd0Im, ibest, ss) {
         }
     }
     return ibest + maxIdx - 4;
+}
+function shiftDownsampledFrequency(cd0Re, cd0Im, delf) {
+    if (delf === 0)
+        return;
+    const dphi = TWO_PI * delf * DT2;
+    let phi = 0;
+    for (let i = 0; i < NP2; i++) {
+        const re = cd0Re[i];
+        const im = cd0Im[i];
+        const c = Math.cos(phi);
+        const s = Math.sin(phi);
+        cd0Re[i] = re * c - im * s;
+        cd0Im[i] = re * s + im * c;
+        phi = (phi + dphi) % TWO_PI;
+    }
 }
 function extractSoftSymbols(cd0Re, cd0Im, ibest, workspace) {
     const { s8, csRe, csIm, symbRe, symbIm } = workspace;
@@ -3035,7 +3110,7 @@ function buildBitMetrics(workspace) {
 }
 function tryDecodePasses(workspace, depth) {
     const scalefac = 2.83;
-    const maxosd = depth >= 3 ? 2 : depth >= 2 ? 0 : -1;
+    const maxosd = depth >= 4 ? 2 : depth >= 3 ? 1 : depth >= 2 ? 0 : -1;
     const bmetrics = [workspace.bmeta, workspace.bmetb, workspace.bmetc, workspace.bmetd];
     workspace.apmask.fill(0);
     for (let ipass = 0; ipass < 4; ipass++) {
@@ -3046,7 +3121,35 @@ function tryDecodePasses(workspace, depth) {
         if (result && result.nharderrors >= 0 && result.nharderrors <= 36)
             return result;
     }
+    if (depth >= 4) {
+        workspace.apmask.fill(0);
+        const apmag = maxAbsMetric(workspace.bmeta) * scalefac * 1.01;
+        for (let i = 0; i < N_LDPC; i++)
+            workspace.llr[i] = scalefac * workspace.bmeta[i];
+        for (let i = 0; i < CQ_AP_BITS.length; i++) {
+            workspace.apmask[i] = 1;
+            workspace.llr[i] = apmag * (CQ_AP_BITS[i] === 1 ? 1 : -1);
+        }
+        workspace.apmask[74] = 1;
+        workspace.apmask[75] = 1;
+        workspace.apmask[76] = 1;
+        workspace.llr[74] = -apmag;
+        workspace.llr[75] = -apmag;
+        workspace.llr[76] = apmag;
+        const result = decode174_91(workspace.llr, workspace.apmask, maxosd);
+        if (result && result.nharderrors >= 0 && result.nharderrors <= 36)
+            return result;
+    }
     return null;
+}
+function maxAbsMetric(metric) {
+    let max = 0;
+    for (let i = 0; i < metric.length; i++) {
+        const v = Math.abs(metric[i]);
+        if (v > max)
+            max = v;
+    }
+    return max;
 }
 function isValidMessageType(message77) {
     const n3v = (message77[71] << 2) | (message77[72] << 1) | message77[73];

@@ -81,12 +81,13 @@ describe("WAV decode: 190227_155815.wav", () => {
   Downloaded from: https://sourceforge.net/projects/wsjt/files/samples/FT8/210703_133430.wav/download
 */
 describe("WAV decode: 210703_133430.wav", () => {
-	test("decodes at least 16 messages matching expected results", () => {
+	test("decodes at least 17 messages matching expected results at depth 4", () => {
 		const wavPath = join(__dirname, "210703_133430.wav");
 		const buf = readFileSync(wavPath);
 		const { sampleRate, samples } = parseWavBuffer(buf);
-		const decoded = decode(samples, { sampleRate, depth: 3 });
+		const decoded = decode(samples, { sampleRate, depth: 4 });
 
-		expect(decoded.length).toBeGreaterThanOrEqual(16);
+		expect(decoded.length).toBeGreaterThanOrEqual(17);
+		expect(decoded.map((d) => d.msg.trim())).toContain("CQ EA2BFM IN83");
 	}, 15_000);
 });

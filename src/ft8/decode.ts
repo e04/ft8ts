@@ -25,9 +25,13 @@ const TAPER_SIZE = 101;
 const TAPER_LAST = TAPER_SIZE - 1;
 const TWO_PI = 2 * Math.PI;
 const MAX_DECODE_PASSES_DEPTH3 = 2;
+const MAX_DECODE_PASSES_DEPTH4 = 3;
 const SUBTRACTION_GAIN = 0.95;
 const SUBTRACTION_PHASE_SHIFT = Math.PI / 2;
 const MIN_SUBTRACTION_SNR = -22;
+const CQ_AP_BITS = [
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0,
+] as const;
 const FS2 = SAMPLE_RATE / NDOWN;
 const DT2 = 1.0 / FS2;
 const DOWNSAMPLE_DF = SAMPLE_RATE / NFFT1_LONG;
@@ -55,7 +59,7 @@ export interface DecodeOptions {
 	freqHigh?: number;
 	/** Minimum sync threshold, default 1.3 */
 	syncMin?: number;
-	/** Decoding depth: 1=fast BP only, 2=BP+OSD, 3=deep */
+	/** Decoding depth: 1=fast BP only, 2=BP+OSD, 3=deep, 4=deeper AP/OSD */
 	depth?: number;
 	/** Maximum candidates to process */
 	maxCandidates?: number;
@@ -98,7 +102,8 @@ export function decode(
 
 	const decoded: DecodedMessage[] = [];
 	const seenMessages = new Set<string>();
-	const maxPasses = depth >= 3 ? MAX_DECODE_PASSES_DEPTH3 : 1;
+	const maxPasses =
+		depth >= 4 ? MAX_DECODE_PASSES_DEPTH4 : depth >= 3 ? MAX_DECODE_PASSES_DEPTH3 : 1;
 
 	for (let pass = 0; pass < maxPasses; pass++) {
 		cxRe.fill(0);
@@ -210,6 +215,8 @@ interface DecodeWorkspace {
 	llr: Float64Array;
 	apmask: Int8Array;
 	ss: Float64Array;
+	fallbackRe: Float64Array;
+	fallbackIm: Float64Array;
 }
 
 function createDecodeWorkspace(): DecodeWorkspace {
@@ -231,6 +238,8 @@ function createDecodeWorkspace(): DecodeWorkspace {
 		llr: new Float64Array(N_LDPC),
 		apmask: new Int8Array(N_LDPC),
 		ss: new Float64Array(9),
+		fallbackRe: new Float64Array(NFFT2),
+		fallbackIm: new Float64Array(NFFT2),
 	};
 }
 
@@ -443,14 +452,37 @@ function ft8b(
 ): Ft8bResult | null {
 	loadCoarseDownsample(cxRe, cxIm, f1, workspace, coarseDownsampleCache, coarseFrequencyUses);
 
-	let ibest = findBestTimeOffset(workspace.cd0Re, workspace.cd0Im, xdt);
+	const ibest = findBestTimeOffset(workspace.cd0Re, workspace.cd0Im, xdt);
 	const delfbest = findBestFrequencyShift(workspace.cd0Re, workspace.cd0Im, ibest);
+	workspace.fallbackRe.set(workspace.cd0Re);
+	workspace.fallbackIm.set(workspace.cd0Im);
 
 	f1 += delfbest;
 	ft8Downsample(cxRe, cxIm, f1, workspace);
 
-	ibest = refineTimeOffset(workspace.cd0Re, workspace.cd0Im, ibest, workspace.ss);
-	xdt = (ibest - 1) * DT2;
+	let result = tryDecodeAtCurrentOffset(f1, ibest, depth, book, workspace);
+	if (result) return result;
+
+	if (depth < 4) return null;
+
+	workspace.cd0Re.set(workspace.fallbackRe);
+	workspace.cd0Im.set(workspace.fallbackIm);
+	shiftDownsampledFrequency(workspace.cd0Re, workspace.cd0Im, -delfbest);
+	result = tryDecodeAtCurrentOffset(f1, ibest, depth, book, workspace);
+	if (result) return result;
+
+	return null;
+}
+
+function tryDecodeAtCurrentOffset(
+	freq: number,
+	ibest0: number,
+	depth: number,
+	book: HashCallBook | undefined,
+	workspace: DecodeWorkspace,
+): Ft8bResult | null {
+	const ibest = refineTimeOffset(workspace.cd0Re, workspace.cd0Im, ibest0, workspace.ss);
+	const xdt = (depth >= 4 ? ibest : ibest - 1) * DT2;
 
 	extractSoftSymbols(workspace.cd0Re, workspace.cd0Im, ibest, workspace);
 	const minCostasHits = depth >= 3 ? 6 : 7;
@@ -469,7 +501,7 @@ function ft8b(
 	if (!success || msg.trim().length === 0) return null;
 
 	const snr = estimateSnr(workspace.s8, result.cw);
-	return { msg, freq: f1, dt: xdt, snr };
+	return { msg, freq, dt: xdt, snr };
 }
 
 function loadCoarseDownsample(
@@ -553,6 +585,21 @@ function refineTimeOffset(
 	}
 
 	return ibest + maxIdx - 4;
+}
+
+function shiftDownsampledFrequency(cd0Re: Float64Array, cd0Im: Float64Array, delf: number): void {
+	if (delf === 0) return;
+	const dphi = TWO_PI * delf * DT2;
+	let phi = 0;
+	for (let i = 0; i < NP2; i++) {
+		const re = cd0Re[i]!;
+		const im = cd0Im[i]!;
+		const c = Math.cos(phi);
+		const s = Math.sin(phi);
+		cd0Re[i] = re * c - im * s;
+		cd0Im[i] = re * s + im * c;
+		phi = (phi + dphi) % TWO_PI;
+	}
 }
 
 function extractSoftSymbols(
@@ -689,7 +736,7 @@ function tryDecodePasses(
 	depth: number,
 ): import("../util/decode174_91.js").DecodeResult | null {
 	const scalefac = 2.83;
-	const maxosd = depth >= 3 ? 2 : depth >= 2 ? 0 : -1;
+	const maxosd = depth >= 4 ? 2 : depth >= 3 ? 1 : depth >= 2 ? 0 : -1;
 	const bmetrics = [workspace.bmeta, workspace.bmetb, workspace.bmetc, workspace.bmetd];
 
 	workspace.apmask.fill(0);
@@ -702,7 +749,35 @@ function tryDecodePasses(
 		if (result && result.nharderrors >= 0 && result.nharderrors <= 36) return result;
 	}
 
+	if (depth >= 4) {
+		workspace.apmask.fill(0);
+		const apmag = maxAbsMetric(workspace.bmeta) * scalefac * 1.01;
+		for (let i = 0; i < N_LDPC; i++) workspace.llr[i] = scalefac * workspace.bmeta[i]!;
+		for (let i = 0; i < CQ_AP_BITS.length; i++) {
+			workspace.apmask[i] = 1;
+			workspace.llr[i] = apmag * (CQ_AP_BITS[i]! === 1 ? 1 : -1);
+		}
+		workspace.apmask[74] = 1;
+		workspace.apmask[75] = 1;
+		workspace.apmask[76] = 1;
+		workspace.llr[74] = -apmag;
+		workspace.llr[75] = -apmag;
+		workspace.llr[76] = apmag;
+
+		const result = decode174_91(workspace.llr, workspace.apmask, maxosd);
+		if (result && result.nharderrors >= 0 && result.nharderrors <= 36) return result;
+	}
+
 	return null;
+}
+
+function maxAbsMetric(metric: Float64Array): number {
+	let max = 0;
+	for (let i = 0; i < metric.length; i++) {
+		const v = Math.abs(metric[i]!);
+		if (v > max) max = v;
+	}
+	return max;
 }
 
 function isValidMessageType(message77: number[]): boolean {
