@@ -4,18 +4,182 @@
  * Implemented message types
  * ─────────────────────────
  *  0.0  Free text (≤13 chars from the 42-char FT8 alphabet)
+ *  0.1  DXpedition
+ *  0.3/0.4 ARRL Field Day
+ *  0.5  Telemetry
+ *  0.6  WSPR-style callsign/grid/power payloads
  *  1    Standard (two callsigns + grid/report/RR73/73)
  *       /R and /P suffixes on either callsign → ipa/ipb = 1 (triggers i3=2 for /P)
+ *  3    ARRL RTTY Roundup
  *  4    One nonstandard (<hash>) call + one standard call
  *       e.g.  <YW18FIFA> KA1ABC 73
  *             KA1ABC <YW18FIFA> -11
  *             CQ YW18FIFA
+ *  5    EU VHF contest with two hashed calls
  *
  * Reference: lib/77bit/packjt77.f90 (subroutines pack77, pack28, pack77_1,
- *            pack77_4, packtext77, ihashcall)
+ *            pack77_3, pack77_4, pack77_5, packtext77, ihashcall)
  */
 
 import { A1, A2, A3, A4, C38, FTALPH, MAX22, MAX28, MAXGRID4, NTOKENS } from "./constants.js";
+
+const FIELD_DAY_SECTIONS = [
+	"AB",
+	"AK",
+	"AL",
+	"AR",
+	"AZ",
+	"BC",
+	"CO",
+	"CT",
+	"DE",
+	"EB",
+	"EMA",
+	"ENY",
+	"EPA",
+	"EWA",
+	"GA",
+	"GTA",
+	"IA",
+	"ID",
+	"IL",
+	"IN",
+	"KS",
+	"KY",
+	"LA",
+	"LAX",
+	"MAR",
+	"MB",
+	"MDC",
+	"ME",
+	"MI",
+	"MN",
+	"MO",
+	"MS",
+	"MT",
+	"NC",
+	"ND",
+	"NE",
+	"NFL",
+	"NH",
+	"NL",
+	"NLI",
+	"NM",
+	"NNJ",
+	"NNY",
+	"NT",
+	"NTX",
+	"NV",
+	"OH",
+	"OK",
+	"ONE",
+	"ONN",
+	"ONS",
+	"OR",
+	"ORG",
+	"PAC",
+	"PR",
+	"QC",
+	"RI",
+	"SB",
+	"SC",
+	"SCV",
+	"SD",
+	"SDG",
+	"SF",
+	"SFL",
+	"SJV",
+	"SK",
+	"SNJ",
+	"STX",
+	"SV",
+	"TN",
+	"UT",
+	"VA",
+	"VI",
+	"VT",
+	"WCF",
+	"WI",
+	"WMA",
+	"WNY",
+	"WPA",
+	"WTX",
+	"WV",
+	"WWA",
+	"WY",
+	"DX",
+	"PE",
+] as const;
+
+const RTTY_MULTIPLIERS = [
+	"AL",
+	"AK",
+	"AZ",
+	"AR",
+	"CA",
+	"CO",
+	"CT",
+	"DE",
+	"FL",
+	"GA",
+	"HI",
+	"ID",
+	"IL",
+	"IN",
+	"IA",
+	"KS",
+	"KY",
+	"LA",
+	"ME",
+	"MD",
+	"MA",
+	"MI",
+	"MN",
+	"MS",
+	"MO",
+	"MT",
+	"NE",
+	"NV",
+	"NH",
+	"NJ",
+	"NM",
+	"NY",
+	"NC",
+	"ND",
+	"OH",
+	"OK",
+	"OR",
+	"PA",
+	"RI",
+	"SC",
+	"SD",
+	"TN",
+	"TX",
+	"UT",
+	"VT",
+	"VA",
+	"WA",
+	"WV",
+	"WI",
+	"WY",
+	"NB",
+	"NS",
+	"QC",
+	"ON",
+	"MB",
+	"SK",
+	"AB",
+	"BC",
+	"NWT",
+	"NF",
+	"LB",
+	"NU",
+	"YT",
+	"PEI",
+	"DC",
+] as const;
+
+const WSPR_NZZZ = 36 * 36 * 36;
 
 /** 9-limb big-integer (base 256, big-endian in limbs[0..8]) */
 type MP = Uint8Array; // length 9
@@ -86,9 +250,9 @@ function packtext77(c13: string): number[] {
  * Fortran: ishft(47055833459_8 * n8, m - 64)
  *  → arithmetic right-shift of 64-bit product by (64 - m), keeping low m bits.
  *
- * Here we only ever call with m=22 (per pack28 for <...> callsigns).
+ * Here we use m=10/12/22 for message types that carry hashed callsigns.
  */
-function ihashcall22(c0: string): number {
+function ihashcall(c0: string, width: 10 | 12 | 22): number {
 	const C = C38;
 	let n8 = 0n;
 	const s = c0.padEnd(11, " ").slice(0, 11).toUpperCase();
@@ -98,9 +262,11 @@ function ihashcall22(c0: string): number {
 	}
 	const MAGIC = 47055833459n;
 	const prod = BigInt.asUintN(64, MAGIC * n8);
-	// arithmetic right-shift by (64 - 22) = 42 bits → take top 22 bits
-	const result = Number(prod >> 42n) & 0x3fffff; // 22 bits
-	return result;
+	return Number(prod >> BigInt(64 - width)) & ((1 << width) - 1);
+}
+
+function ihashcall22(c0: string): number {
+	return ihashcall(c0, 22);
 }
 
 /**
@@ -259,6 +425,11 @@ function appendBits(bits: number[], val: number, width: number): void {
 	}
 }
 
+function appendType0Suffix(bits: number[], n3: number): void {
+	appendBits(bits, n3, 3);
+	appendBits(bits, 0, 3);
+}
+
 /**
  * Pack an FT8 message into 77 bits.
  * Returns an array of 0/1 values, length 77.
@@ -293,16 +464,196 @@ export function pack77(msg: string): number[] {
 	const parts = split77(msg);
 	if (parts.length < 1) throw new Error("Empty message");
 
+	const dxpedition = tryPackType01(parts);
+	if (dxpedition) return dxpedition;
+
+	const fieldDay = tryPackType03(parts);
+	if (fieldDay) return fieldDay;
+
+	if (parts.length === 1) {
+		const telemetry = tryPackType05(parts[0]!);
+		if (telemetry) return telemetry;
+	}
+
+	const wspr = tryPackType06(parts);
+	if (wspr) return wspr;
+
 	// ── Try Type 1/2: standard message ────────────────────────────────────────
 	const t1 = tryPackType1(parts);
 	if (t1) return t1;
+
+	const rtty = tryPackType3(parts);
+	if (rtty) return rtty;
 
 	// ── Try Type 4: one hash call ──────────────────────────────────────────────
 	const t4 = tryPackType4(parts);
 	if (t4) return t4;
 
+	const vhf = tryPackType5(parts);
+	if (vhf) return vhf;
+
 	// ── Default: Type 0.0 free text ───────────────────────────────────────────
 	return packFreeText(msg);
+}
+
+function tryPackType01(parts: string[]): number[] | null {
+	if (parts.length !== 5) return null;
+	if (parts[1] !== "RR73;") return null;
+	const hashed = parts[3]!;
+	if (!hashed.startsWith("<") || !hashed.endsWith(">")) return null;
+
+	const p1 = parseCallsign(parts[0]!);
+	const p2 = parseCallsign(parts[2]!);
+	if (!p1.isStandard || !p2.isStandard) return null;
+
+	const report = parseInt(parts[4]!, 10);
+	if (Number.isNaN(report)) return null;
+	let n5 = Math.trunc((report + 30) / 2);
+	if (n5 < 0) n5 = 0;
+	if (n5 > 31) n5 = 31;
+
+	const bits: number[] = [];
+	appendBits(bits, pack28(p1.basecall), 28);
+	appendBits(bits, pack28(p2.basecall), 28);
+	appendBits(bits, ihashcall(hashed.slice(1, -1), 10), 10);
+	appendBits(bits, n5, 5);
+	appendType0Suffix(bits, 1);
+	return bits;
+}
+
+function tryPackType03(parts: string[]): number[] | null {
+	if (parts.length < 4 || parts.length > 5) return null;
+	const p1 = parseCallsign(parts[0]!);
+	const p2 = parseCallsign(parts[1]!);
+	if (!p1.isStandard || !p2.isStandard) return null;
+
+	const section = parts[parts.length - 1]!;
+	const isec = FIELD_DAY_SECTIONS.indexOf(section as (typeof FIELD_DAY_SECTIONS)[number]);
+	if (isec < 0) return null;
+	if (parts.length === 5 && parts[2] !== "R") return null;
+
+	const ntxClass = /^(\d{1,2})([A-Z])$/.exec(parts[parts.length - 2]!);
+	if (!ntxClass) return null;
+	const ntx = parseInt(ntxClass[1]!, 10);
+	if (ntx < 1 || ntx > 32) return null;
+	const nclass = ntxClass[2]!.charCodeAt(0) - 65;
+	if (nclass < 0 || nclass > 7) return null;
+
+	let n3 = 3;
+	let intx = ntx - 1;
+	if (intx >= 16) {
+		n3 = 4;
+		intx = ntx - 17;
+	}
+
+	const bits: number[] = [];
+	appendBits(bits, pack28(p1.basecall), 28);
+	appendBits(bits, pack28(p2.basecall), 28);
+	appendBits(bits, parts[2] === "R" ? 1 : 0, 1);
+	appendBits(bits, intx, 4);
+	appendBits(bits, nclass, 3);
+	appendBits(bits, isec + 1, 7);
+	appendType0Suffix(bits, n3);
+	return bits;
+}
+
+function tryPackType05(word: string): number[] | null {
+	if (!/^[0-9A-F]{18}$/.test(word)) return null;
+	const hex = word.padStart(18, "0");
+	const n23 = parseInt(hex.slice(0, 6), 16);
+	if (n23 >= 2 ** 23) return null;
+
+	const bits: number[] = [];
+	appendBits(bits, n23, 23);
+	appendBits(bits, parseInt(hex.slice(6, 12), 16), 24);
+	appendBits(bits, parseInt(hex.slice(12, 18), 16), 24);
+	appendType0Suffix(bits, 5);
+	return bits;
+}
+
+function tryPackType06(parts: string[]): number[] | null {
+	const type1 = tryPackWsprType1(parts);
+	if (type1) return type1;
+	const type2 = tryPackWsprType2(parts);
+	if (type2) return type2;
+	return null;
+}
+
+function packDbm(dbmWord: string): number | null {
+	if (!/^\d{1,2}$/.test(dbmWord)) return null;
+	let dbm = parseInt(dbmWord, 10);
+	if (dbm < 0) dbm = 0;
+	if (dbm > 60) dbm = 60;
+	return Math.round(0.3 * dbm);
+}
+
+function tryPackWsprType1(parts: string[]): number[] | null {
+	if (parts.length !== 3) return null;
+	const [call, grid4, dbmWord] = parts as [string, string, string];
+	if (call.length < 3 || call.length > 6) return null;
+	if (!parseCallsign(call).isStandard) return null;
+	if (!isGrid4(grid4)) return null;
+	const idbm = packDbm(dbmWord);
+	if (idbm === null) return null;
+
+	const bits: number[] = [];
+	appendBits(bits, pack28(call), 28);
+	appendBits(bits, packgrid4(grid4), 15);
+	appendBits(bits, idbm, 5);
+	appendBits(bits, 0, 2);
+	appendBits(bits, 0, 21);
+	appendType0Suffix(bits, 6);
+	return bits;
+}
+
+function tryPackWsprType2(parts: string[]): number[] | null {
+	if (parts.length !== 2) return null;
+	const [compound, dbmWord] = parts as [string, string];
+	if (compound.length < 5 || compound.length > 10) return null;
+	const slash = compound.indexOf("/");
+	if (slash < 1 || slash === compound.length - 1) return null;
+	const idbm = packDbm(dbmWord);
+	if (idbm === null) return null;
+
+	const left = compound.slice(0, slash);
+	const right = compound.slice(slash + 1);
+	let baseCall: string;
+	let npfx: number;
+
+	if (left.length <= 3) {
+		if (left.length < 1 || left.length > 3 || !/^[0-9A-Z]+$/.test(left)) return null;
+		if (!parseCallsign(right).isStandard) return null;
+		baseCall = right;
+		npfx = 0;
+		for (const ch of left) {
+			const idx = A2.indexOf(ch);
+			if (idx < 0) return null;
+			npfx = 36 * npfx + idx;
+		}
+	} else {
+		if (right.length < 1 || right.length > 3 || !/^[0-9A-Z]+$/.test(right)) return null;
+		if (right.length === 3 && !/^\d$/.test(right[2]!)) return null;
+		if (!parseCallsign(left).isStandard) return null;
+		baseCall = left;
+		if (right.length === 1) {
+			npfx = A2.indexOf(right[0]!);
+		} else if (right.length === 2) {
+			npfx = 36 * A2.indexOf(right[0]!) + A2.indexOf(right[1]!);
+		} else {
+			npfx = 360 * A2.indexOf(right[0]!) + 10 * A2.indexOf(right[1]!) + A2.indexOf(right[2]!);
+		}
+		if (npfx < 0) return null;
+		npfx += WSPR_NZZZ;
+	}
+
+	const bits: number[] = [];
+	appendBits(bits, pack28(baseCall), 28);
+	appendBits(bits, npfx, 16);
+	appendBits(bits, idbm, 5);
+	appendBits(bits, 1, 1);
+	appendBits(bits, 0, 21);
+	appendType0Suffix(bits, 6);
+	return bits;
 }
 
 function tryPackType1(parts: string[]): number[] | null {
@@ -429,6 +780,76 @@ function isGrid4(s: string): boolean {
 	);
 }
 
+function isGrid6(s: string): boolean {
+	return (
+		s.length === 6 &&
+		s[0]! >= "A" &&
+		s[0]! <= "R" &&
+		s[1]! >= "A" &&
+		s[1]! <= "R" &&
+		s[2]! >= "0" &&
+		s[2]! <= "9" &&
+		s[3]! >= "0" &&
+		s[3]! <= "9" &&
+		s[4]! >= "A" &&
+		s[4]! <= "X" &&
+		s[5]! >= "A" &&
+		s[5]! <= "X"
+	);
+}
+
+function packgrid6(s: string): number {
+	const j1 = (s.charCodeAt(0) - 65) * 18 * 10 * 10 * 24 * 24;
+	const j2 = (s.charCodeAt(1) - 65) * 10 * 10 * 24 * 24;
+	const j3 = (s.charCodeAt(2) - 48) * 10 * 24 * 24;
+	const j4 = (s.charCodeAt(3) - 48) * 24 * 24;
+	const j5 = (s.charCodeAt(4) - 65) * 24;
+	const j6 = s.charCodeAt(5) - 65;
+	return j1 + j2 + j3 + j4 + j5 + j6;
+}
+
+function tryPackType3(parts: string[]): number[] | null {
+	if (parts.length < 4 || parts.length > 6) return null;
+	if (parts[0]?.startsWith("<") && parts[1]?.startsWith("<")) return null;
+
+	const itu = parts[0] === "TU;" ? 1 : 0;
+	const call1 = parts[itu]!;
+	const call2 = parts[itu + 1]!;
+	const p1 = parseCallsign(call1);
+	const p2 = parseCallsign(call2);
+	if (!p1.isStandard || !p2.isStandard) return null;
+
+	const reportIndex = itu + 2 + (parts[itu + 2] === "R" ? 1 : 0);
+	if (reportIndex !== parts.length - 2) return null;
+	const report = parts[reportIndex];
+	const exchange = parts[parts.length - 1]!;
+	if (!report || !/^5[2-9]9$/.test(report)) return null;
+
+	let nexch = 0;
+	const serial = parseInt(exchange, 10);
+	if (/^\d+$/.test(exchange) && serial > 0 && serial <= 7999) {
+		nexch = serial;
+	} else {
+		const imult = RTTY_MULTIPLIERS.indexOf(exchange as (typeof RTTY_MULTIPLIERS)[number]);
+		if (imult < 0) return null;
+		nexch = 8000 + imult + 1;
+	}
+
+	let irpt = Math.trunc((parseInt(report, 10) - 509) / 10) - 2;
+	if (irpt < 0) irpt = 0;
+	if (irpt > 7) irpt = 7;
+
+	const bits: number[] = [];
+	appendBits(bits, itu, 1);
+	appendBits(bits, pack28(p1.basecall), 28);
+	appendBits(bits, pack28(p2.basecall), 28);
+	appendBits(bits, parts[itu + 2] === "R" ? 1 : 0, 1);
+	appendBits(bits, irpt, 3);
+	appendBits(bits, nexch, 13);
+	appendBits(bits, 3, 3);
+	return bits;
+}
+
 /**
  * Type 4: one nonstandard (or hashed <...>) call + one standard call.
  * Format:  <HASH> CALL [RRR|RR73|73]
@@ -502,16 +923,38 @@ function tryPackType4(parts: string[]): number[] | null {
 	return bits;
 }
 
+function tryPackType5(parts: string[]): number[] | null {
+	if (parts.length < 4 || parts.length > 5) return null;
+	if (parts.length === 5 && parts[2] !== "R") return null;
+	const w1 = parts[0]!;
+	const w2 = parts[1]!;
+	if (!w1.startsWith("<") || !w1.endsWith(">")) return null;
+	if (!w2.startsWith("<") || !w2.endsWith(">")) return null;
+
+	const exchange = parts[parts.length - 2]!;
+	const grid6 = parts[parts.length - 1]!;
+	if (!isGrid6(grid6)) return null;
+	const nx = parseInt(exchange, 10);
+	if (Number.isNaN(nx) || nx < 520001 || nx > 594095) return null;
+
+	const ir = parts[2] === "R" ? 1 : 0;
+	const irpt = Math.trunc(nx / 10000) - 52;
+	let iserial = nx % 10000;
+	if (iserial > 2047) iserial = 2047;
+
+	const bits: number[] = [];
+	appendBits(bits, ihashcall(w1.slice(1, -1), 12), 12);
+	appendBits(bits, ihashcall(w2.slice(1, -1), 22), 22);
+	appendBits(bits, ir, 1);
+	appendBits(bits, irpt, 3);
+	appendBits(bits, iserial, 11);
+	appendBits(bits, packgrid6(grid6), 25);
+	appendBits(bits, 5, 3);
+	return bits;
+}
+
 function ihashcall12(c0: string): number {
-	let n8 = 0n;
-	const s = c0.padEnd(11, " ").slice(0, 11).toUpperCase();
-	for (let i = 0; i < 11; i++) {
-		const j = C38.indexOf(s[i] ?? " ");
-		n8 = 38n * n8 + BigInt(j < 0 ? 0 : j);
-	}
-	const MAGIC = 47055833459n;
-	const prod = BigInt.asUintN(64, MAGIC * n8);
-	return Number(prod >> 52n) & 0xfff; // 12 bits
+	return ihashcall(c0, 12);
 }
 
 function encodeC11(c11: string): bigint {

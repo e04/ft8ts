@@ -1,7 +1,15 @@
 import { HashCallBook } from "../src/util/hashcall.js";
 
 /** Callsigns that appear as hashes (in angle brackets) in test messages. */
-export const KNOWN_CALLSIGNS = ["PJ4/K1ABC", "YW18FIFA", "W9XYZ", "KA1ABC"] as const;
+export const KNOWN_CALLSIGNS = [
+	"PJ4/K1ABC",
+	"YW18FIFA",
+	"W9XYZ",
+	"KA1ABC",
+	"KH1/KH7Z",
+	"PA3XYZ",
+	"K1ABC",
+] as const;
 
 export function makeBookWithKnownCalls(): HashCallBook {
 	const book = new HashCallBook();
@@ -13,6 +21,16 @@ export function makeBookWithKnownCalls(): HashCallBook {
 export const ROUND_TRIP_MESSAGES: readonly string[] = [
 	// Type 0 – Free text
 	"TNX BOB 73 GL",
+	// Type 0.1 – DXpedition
+	`K1ABC RR73; W9XYZ <${KNOWN_CALLSIGNS[4]}> -10`,
+	// Type 0.3/0.4 – ARRL Field Day
+	"W9XYZ K1ABC R 16A EMA",
+	"W9XYZ K1ABC R 32A PE",
+	// Type 0.5 – Telemetry
+	"123456789ABCDEF012",
+	// Type 0.6 – WSPR-style callsign/grid/power
+	"K1ABC FN42 30",
+	"PJ4/K1ABC 30",
 	// Type 1 – Standard (two callsigns + grid/RR73/73/report)
 	"CQ K1ABC FN42",
 	"CQ K1FM FN30",
@@ -66,4 +84,9 @@ export const ROUND_TRIP_MESSAGES: readonly string[] = [
 	`<${KNOWN_CALLSIGNS[2]}> ${KNOWN_CALLSIGNS[1]} 73`,
 	`CQ ${KNOWN_CALLSIGNS[1]}`,
 	`<${KNOWN_CALLSIGNS[3]}> ${KNOWN_CALLSIGNS[1]} RR73`,
+	// Type 3 – ARRL RTTY Roundup
+	"TU; W9XYZ K1ABC R 579 MA",
+	"W9XYZ G8ABC R 559 0013",
+	// Type 5 – EU VHF contest with two hashed calls
+	`<${KNOWN_CALLSIGNS[5]}> <${KNOWN_CALLSIGNS[6]}> R 570007 JO22DB`,
 ];
