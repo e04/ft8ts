@@ -26,6 +26,8 @@ export const ROUND_TRIP_MESSAGES: readonly string[] = [
 	// Type 0.3/0.4 – ARRL Field Day
 	"W9XYZ K1ABC R 16A EMA",
 	"W9XYZ K1ABC R 32A PE",
+	"W9XYZ K1ABC R 1A GH",
+	"W9XYZ K1ABC R 32A NB",
 	// Type 0.5 – Telemetry
 	"123456789ABCDEF012",
 	// Type 0.6 – WSPR-style callsign/grid/power

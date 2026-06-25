@@ -13,6 +13,12 @@ import { makeBookWithKnownCalls, ROUND_TRIP_MESSAGES } from "../test-messages.js
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SAMPLE_RATE = 12_000;
 
+function bitsToUint(bits: number[], start: number, len: number): number {
+	let n = 0;
+	for (let i = 0; i < len; i++) n = n * 2 + (bits[start + i] ?? 0);
+	return n;
+}
+
 describe("Unpack77", () => {
 	test.each(ROUND_TRIP_MESSAGES)('unpack matches original: "%s"', (msg) => {
 		const book = makeBookWithKnownCalls();
@@ -20,6 +26,20 @@ describe("Unpack77", () => {
 		const { msg: unpacked, success } = unpack77(bits77, book);
 		expect(success).toBe(true);
 		expect(unpacked).toBe(msg);
+	});
+
+	test.each([
+		["GH", 16],
+		["NS", 25],
+		["TER", 44],
+		["NB", 86],
+	])("packs Field Day section %s using the WSJT-X section index", (section, expectedIndex) => {
+		const msg = `K1ABC W9XYZ 1A ${section}`;
+		const bits77 = pack77(msg);
+		expect(bitsToUint(bits77, 74, 3)).toBe(0);
+		expect(bitsToUint(bits77, 71, 3)).toBe(3);
+		expect(bitsToUint(bits77, 64, 7)).toBe(expectedIndex);
+		expect(unpack77(bits77).msg).toBe(msg);
 	});
 });
 
