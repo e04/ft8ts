@@ -4,6 +4,7 @@ export {
 	decode as decodeFT4,
 } from "./ft4/decode.js";
 export { encode as encodeFT4 } from "./ft4/encode.js";
+export { FT8History } from "./ft8/a7.js";
 export {
 	type DecodedMessage,
 	type DecodeOptions,

@@ -113,6 +113,28 @@ const decoded = decodeFT4(samples, {
 });
 ```
 
+### a7 decoding across slots
+
+At depth 3, the FT8 decoder can also use the decodes of the slot 30 s earlier, like WSJT-X's "a7" decoding: a station decoded then and not decoded now is looked for at the same frequency with the messages it is likely to send next (`RRR`, `RR73`, `73`, reports, its grid, ...), which finds signals a few dB weaker than regular decoding. Pass the same `FT8History` for consecutive slots together with the slot's start time:
+
+```typescript
+import { decodeFT8, FT8History, HashCallBook } from "@e04/ft8ts";
+
+const book = new HashCallBook();
+const history = new FT8History();
+
+// Call once per 15 s slot
+function onSlot(samples: Float32Array, slotStart: Date) {
+  const decoded = decodeFT8(samples, { depth: 3, hashCallBook: book, history, slotStart });
+  for (const d of decoded) {
+    // d.ap is 7 for a7 decodes (1 for the "CQ ??? ???" AP pass)
+    console.log(`${d.freq} Hz  SNR ${d.snr} dB  ${d.msg}${d.ap ? `  a${d.ap}` : ""}`);
+  }
+}
+```
+
+Like other a priori decodes, a7 decodes are more likely to be false than regular ones; they are marked with `ap`.
+
 ### Decode Options
 
 | Option | Default | Description |
@@ -125,6 +147,8 @@ const decoded = decodeFT4(samples, {
 | `maxCandidates` | 1000 (FT8) / 200 (FT4) | Maximum candidates to process |
 | `contest` | — | FT8 only. WSJT-X "Special operating activity": `NA_VHF`, `EU_VHF`, `FIELD_DAY`, `RTTY`, `WW_DIGI` or `ARRL_DIGI`. Without it, standard messages containing `/R` or starting with `TU;` are rejected as likely false decodes, as in WSJT-X 3 |
 | `hashCallBook` | — | `HashCallBook` instance for resolving hashed callsigns |
+| `history` | — | FT8 only. `FT8History` instance for a7 decoding (see above); decodes are saved at any depth, a7 runs at depth 3 |
+| `slotStart` | — | FT8 only. Start of (or any time within) the slot being decoded, as a `Date` or ms since epoch. Required with `history` |
 
 ## Build
 

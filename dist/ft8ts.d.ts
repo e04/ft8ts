@@ -88,6 +88,44 @@ interface WaveformOptions {
 
 declare function encode$1(msg: string, options?: WaveformOptions): Float32Array;
 
+/** A decode saved for a7: "call_1 call_2" plus the grid, if the message had one. */
+interface A7Entry {
+    dt: number;
+    freq: number;
+    msg: string;
+}
+/**
+ * Decodes of recent FT8 slots, used for "a7" decoding: a station decoded 30 s
+ * earlier is looked for again at the same frequency with the messages it is
+ * likely to send next.
+ *
+ * Pass the same instance to consecutive `decodeFT8` calls together with
+ * `slotStart`:
+ * ```ts
+ * const history = new FT8History();
+ * const decoded = decodeFT8(samples, { depth: 3, history, slotStart: Date.now() });
+ * ```
+ */
+declare class FT8History {
+    /** Saved decodes keyed by slot number, floor(ms since epoch / 15000). */
+    private readonly slots;
+    /** Remove all saved decodes. */
+    clear(): void;
+    /**
+     * Start a new tally for `slot`, replacing one saved by an earlier decode of
+     * the same slot, and return the tally of the previous slot of the same
+     * sequence (30 s earlier).
+     */
+    beginSlot(slot: number): readonly A7Entry[];
+    /** Save a decode of `slot` (ft8_a7_save). `dt` and `freq` are as reported to the user. */
+    save(slot: number, dt: number, freq: number, msg: string): void;
+    /**
+     * Whether a decode already saved for `slot` comes from the station of
+     * `entry` (saved for slot - 2), so that no a7 decode should be tried for it.
+     */
+    supersedes(slot: number, entry: A7Entry): boolean;
+}
+
 /** WSJT-X "Special operating activity" (ncontest) settings that affect FT8 decoding. */
 type FT8Contest = "NA_VHF" | "EU_VHF" | "FIELD_DAY" | "RTTY" | "WW_DIGI" | "ARRL_DIGI";
 interface DecodedMessage {
@@ -95,7 +133,14 @@ interface DecodedMessage {
     dt: number;
     snr: number;
     msg: string;
+    /** Sync power of the candidate; 0 for a7 decodes, which are not found by the sync search */
     sync: number;
+    /**
+     * A priori (AP) decoding type as in WSJT-X, absent for ordinary decodes:
+     * 1 = "CQ ??? ???" AP pass (depth 3), 7 = a7 decode of a station decoded 30 s
+     * earlier (depth 3 with `history`). These are more likely to be false decodes.
+     */
+    ap?: number;
 }
 interface DecodeOptions {
     /** Sample rate (Hz), default 12000 */
@@ -125,6 +170,15 @@ interface DecodeOptions {
      * callsign knowledge over time.
      */
     hashCallBook?: HashCallBook;
+    /**
+     * Decodes of recent slots for "a7" decoding. Decodes are saved into it at
+     * any depth; at depth 3, stations decoded in the slot 30 s earlier and not
+     * decoded in this one are looked for with the messages they are likely to
+     * send next. Pass the same instance for consecutive slots, with `slotStart`.
+     */
+    history?: FT8History;
+    /** Start of (or any time within) the 15 s slot being decoded, as a Date or ms since epoch. Required with `history`. */
+    slotStart?: Date | number;
 }
 /**
  * Decode all FT8 signals in an audio buffer.
@@ -134,5 +188,5 @@ declare function decode(samples: Float32Array | Float64Array, options?: DecodeOp
 
 declare function encode(msg: string, options?: WaveformOptions): Float32Array;
 
-export { HashCallBook, decode$1 as decodeFT4, decode as decodeFT8, encode$1 as encodeFT4, encode as encodeFT8 };
+export { FT8History, HashCallBook, decode$1 as decodeFT4, decode as decodeFT8, encode$1 as encodeFT4, encode as encodeFT8 };
 export type { DecodeOptions$1 as DecodeFT4Options, DecodeOptions, DecodedMessage$1 as DecodedFT4Message, DecodedMessage, FT8Contest };

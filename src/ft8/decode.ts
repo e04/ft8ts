@@ -3,10 +3,18 @@ import { type DecodeResult, decode174_91 } from "../util/decode174_91.js";
 import { fftComplex } from "../util/fft.js";
 import type { HashCallBook } from "../util/hashcall.js";
 import { unpack77 } from "../util/unpack_jt77.js";
+import {
+	type A7Entry,
+	a7Candidates,
+	a7MessageText,
+	type FT8History,
+	isStandardCall,
+	slotNumber,
+} from "./a7.js";
 import { COSTAS, GRAY_MAP } from "./constants.js";
 
 // Port of the WSJT-X v3.0.1 FT8 decoder (ft8_decode.f90, sync8.f90, ft8b.f90,
-// subtractft8.f90, get_spectrum_baseline.f90).
+// subtractft8.f90, get_spectrum_baseline.f90, ft8_a7.f90).
 
 const NSPS = 1920;
 const NFFT1 = 2 * NSPS; // 3840
@@ -108,7 +116,14 @@ export interface DecodedMessage {
 	dt: number;
 	snr: number;
 	msg: string;
+	/** Sync power of the candidate; 0 for a7 decodes, which are not found by the sync search */
 	sync: number;
+	/**
+	 * A priori (AP) decoding type as in WSJT-X, absent for ordinary decodes:
+	 * 1 = "CQ ??? ???" AP pass (depth 3), 7 = a7 decode of a station decoded 30 s
+	 * earlier (depth 3 with `history`). These are more likely to be false decodes.
+	 */
+	ap?: number;
 }
 
 export interface DecodeOptions {
@@ -139,6 +154,15 @@ export interface DecodeOptions {
 	 * callsign knowledge over time.
 	 */
 	hashCallBook?: HashCallBook;
+	/**
+	 * Decodes of recent slots for "a7" decoding. Decodes are saved into it at
+	 * any depth; at depth 3, stations decoded in the slot 30 s earlier and not
+	 * decoded in this one are looked for with the messages they are likely to
+	 * send next. Pass the same instance for consecutive slots, with `slotStart`.
+	 */
+	history?: FT8History;
+	/** Start of (or any time within) the 15 s slot being decoded, as a Date or ms since epoch. Required with `history`. */
+	slotStart?: Date | number;
 }
 
 interface Candidate {
@@ -156,6 +180,19 @@ interface Ft8bResult {
 	dtSubtract: number;
 	snr: number;
 	tones: number[];
+	/** AP type (iaptype), 0 for regular decoding */
+	ap: number;
+}
+
+interface Demodulated {
+	/** Refined frequency (Hz) */
+	freq: number;
+	/** Start of the signal in downsampled samples */
+	ibest: number;
+	/** Refined start time (s) used for signal subtraction */
+	dtSubtract: number;
+	/** Number of Costas symbols received as expected (max 21) */
+	nsync: number;
 }
 
 interface SyncTemplate {
@@ -219,6 +256,12 @@ export function decode(
 	const maxCandidates = options.maxCandidates ?? 1000;
 	const book = options.hashCallBook;
 	const contest = options.contest;
+	const history = options.history;
+	if (history && options.slotStart === undefined) {
+		throw new TypeError("decodeFT8: `slotStart` is required when `history` is given");
+	}
+	const slot = options.slotStart === undefined ? 0 : slotNumber(options.slotStart);
+	const previous = history?.beginSlot(slot) ?? [];
 
 	const dd =
 		sampleRate === SAMPLE_RATE
@@ -228,6 +271,15 @@ export function decode(
 	const workspace = createDecodeWorkspace();
 	const decoded: DecodedMessage[] = [];
 	const seenMessages = new Set<string>();
+	/** Adds a decode unless its message was already decoded, and saves it for a7. */
+	const addDecode = (d: DecodedMessage): void => {
+		const messageKey = normalizeMessageKey(d.msg);
+		if (seenMessages.has(messageKey)) return;
+		seenMessages.add(messageKey);
+		decoded.push(d);
+		history?.save(slot, d.dt, d.freq, d.msg);
+	};
+	let sbase: Float64Array = new Float64Array(NH1 + 1);
 
 	const npass = depth <= 1 ? 2 : 3;
 	for (let ipass = 1; ipass <= npass; ipass++) {
@@ -235,7 +287,9 @@ export function decode(
 		const imetric = ipass === 1 ? 1 : 2;
 		if (ipass === 3 && decoded.length === 0) break;
 
-		const { candidates, sbase } = sync8(dd, nfa, nfb, syncmin, maxCandidates);
+		const sync = sync8(dd, nfa, nfb, syncmin, maxCandidates);
+		const candidates = sync.candidates;
+		sbase = sync.sbase;
 		computeLongSpectrum(dd, workspace);
 		// Bands [lo, hi] (Hz) of signals subtracted since the spectrum was computed.
 		const staleBands: number[] = [];
@@ -258,16 +312,26 @@ export function decode(
 			subtractft8(dd, result.tones, result.freq, result.dtSubtract, workspace);
 			staleBands.push(result.freq - SIGNAL_BAND_BELOW, result.freq + SIGNAL_BAND_ABOVE);
 
-			const messageKey = normalizeMessageKey(result.msg);
-			if (seenMessages.has(messageKey)) continue;
-			seenMessages.add(messageKey);
-			decoded.push({
+			addDecode({
 				freq: result.freq,
 				dt: result.dt - 0.5,
 				snr: result.snr,
 				msg: result.msg,
 				sync: cand.sync,
+				...(result.ap ? { ap: result.ap } : {}),
 			});
+		}
+	}
+
+	// a7: stations decoded 30 s earlier, looked for in the residual signal.
+	if (history && depth >= 3 && previous.length > 0) {
+		computeLongSpectrum(dd, workspace);
+		for (const entry of previous) {
+			if (history.supersedes(slot, entry)) continue;
+			const ibin = Math.max(1, Math.round(entry.freq / SYNC_DF));
+			const xbase = 10.0 ** (0.1 * (sbase[ibin]! - 40.0));
+			const result = ft8a7d(entry, xbase, workspace);
+			if (result) addDecode({ ...result, sync: 0, ap: 7 });
 		}
 	}
 
@@ -642,53 +706,10 @@ function ft8b(
 	book: HashCallBook | undefined,
 	workspace: DecodeWorkspace,
 ): Ft8bResult | null {
-	const { cd0Re, cd0Im, ss, s8 } = workspace;
-	let f1 = f1In;
-
-	ft8Downsample(f1, workspace);
-
-	// WSJT-X searches time at the candidate frequency and then frequency at
-	// that time. The candidate frequency can be off by up to half a 3.125 Hz
-	// bin, which biases the time search, so search time and frequency jointly.
-	const i0 = Math.round((xdtIn + 0.5) * FS2);
-	const search = searchTimeFrequency(cd0Re, cd0Im, i0, workspace.syncGrid);
-	let ibest = search.ibest;
-	f1 += search.delf;
-
-	ft8Downsample(f1, workspace);
-
-	for (let idt = -4; idt <= 4; idt++) {
-		ss[idt + 4] = sync8d(cd0Re, cd0Im, ibest + idt, COSTAS_SYNC.re, COSTAS_SYNC.im);
-	}
-	let iloc = 0;
-	for (let i = 1; i < 9; i++) if (ss[i]! > ss[iloc]!) iloc = i;
-	ibest += iloc - 4;
+	const { s8 } = workspace;
+	const { freq: f1, ibest, dtSubtract, nsync } = demodulate(f1In, xdtIn, workspace);
 	const xdt = (ibest - 1) * DT2;
 
-	// Sub-sample time estimate for signal subtraction
-	let dx = 0;
-	if (iloc > 0 && iloc < 8) {
-		const ym = ss[iloc - 1]!;
-		const y0 = ss[iloc]!;
-		const yp = ss[iloc + 1]!;
-		const c = yp + ym - 2 * y0;
-		if (c < 0) dx = Math.max(-0.5, Math.min(0.5, (-(yp - ym) / 2 / c) * 1));
-	}
-	const dtSubtract = (ibest + dx - 0.5) * DT2;
-
-	extractSoftSymbols(ibest, workspace);
-
-	// Sync quality check: hard sync sum, max 21
-	let nsync = 0;
-	for (let k = 0; k < COSTAS_BLOCKS; k++) {
-		for (const offset of SYNC_TIME_SHIFTS) {
-			let ip = 0;
-			for (let t = 1; t < 8; t++) {
-				if (s8[t * NN + k + offset]! > s8[ip * NN + k + offset]!) ip = t;
-			}
-			if (ip === COSTAS[k]) nsync++;
-		}
-	}
 	let nsyncMin = imetric === 2 ? 7 : 6;
 	if (ndepth <= 2) nsyncMin = 8;
 	if (nsync <= nsyncMin) return null;
@@ -738,10 +759,127 @@ function ft8b(
 		if (nsync <= 10 && xsnr < MIN_SNR) return null;
 		if (xsnr < MIN_SNR) xsnr = MIN_SNR;
 
-		return { msg: accepted, freq: f1, dt: xdt, dtSubtract, snr: xsnr, tones };
+		const ap = ipass > 5 ? 1 : 0;
+		return { msg: accepted, freq: f1, dt: xdt, dtSubtract, snr: xsnr, tones, ap };
 	}
 
 	return null;
+}
+
+/**
+ * Refine time and frequency of a signal near `f1In` Hz starting near `xdtIn` s
+ * (xdt + 0.5 as in sync8), then extract its soft symbols into the workspace.
+ */
+function demodulate(f1In: number, xdtIn: number, workspace: DecodeWorkspace): Demodulated {
+	const { cd0Re, cd0Im, ss, s8 } = workspace;
+	let f1 = f1In;
+
+	ft8Downsample(f1, workspace);
+
+	// WSJT-X searches time at the candidate frequency and then frequency at
+	// that time. The candidate frequency can be off by up to half a 3.125 Hz
+	// bin, which biases the time search, so search time and frequency jointly.
+	const i0 = Math.round((xdtIn + 0.5) * FS2);
+	const search = searchTimeFrequency(cd0Re, cd0Im, i0, workspace.syncGrid);
+	let ibest = search.ibest;
+	f1 += search.delf;
+
+	ft8Downsample(f1, workspace);
+
+	for (let idt = -4; idt <= 4; idt++) {
+		ss[idt + 4] = sync8d(cd0Re, cd0Im, ibest + idt, COSTAS_SYNC.re, COSTAS_SYNC.im);
+	}
+	let iloc = 0;
+	for (let i = 1; i < 9; i++) if (ss[i]! > ss[iloc]!) iloc = i;
+	ibest += iloc - 4;
+
+	// Sub-sample time estimate for signal subtraction
+	let dx = 0;
+	if (iloc > 0 && iloc < 8) {
+		const ym = ss[iloc - 1]!;
+		const y0 = ss[iloc]!;
+		const yp = ss[iloc + 1]!;
+		const c = yp + ym - 2 * y0;
+		if (c < 0) dx = Math.max(-0.5, Math.min(0.5, (-(yp - ym) / 2 / c) * 1));
+	}
+	const dtSubtract = (ibest + dx - 0.5) * DT2;
+
+	extractSoftSymbols(ibest, workspace);
+
+	// Sync quality: hard sync sum, max 21
+	let nsync = 0;
+	for (let k = 0; k < COSTAS_BLOCKS; k++) {
+		for (const offset of SYNC_TIME_SHIFTS) {
+			let ip = 0;
+			for (let t = 1; t < 8; t++) {
+				if (s8[t * NN + k + offset]! > s8[ip * NN + k + offset]!) ip = t;
+			}
+			if (ip === COSTAS[k]) nsync++;
+		}
+	}
+
+	return { freq: f1, ibest, dtSubtract, nsync };
+}
+
+// ── a7 decoding (ft8_a7.f90) ────────────────────────────────────────────────
+
+/**
+ * Look for the station of `entry`, decoded 30 s earlier, at the same
+ * frequency and time: the candidate message closest to the soft symbols wins
+ * if it is clearly closer than the runner-up (ft8_a7d).
+ */
+function ft8a7d(
+	entry: A7Entry,
+	xbase: number,
+	workspace: DecodeWorkspace,
+): { msg: string; freq: number; dt: number; snr: number } | null {
+	const { call1, call2, grid4, candidates } = a7Candidates(entry);
+	const { freq, ibest } = demodulate(entry.freq, entry.dt, workspace);
+	buildBitMetrics(1, workspace);
+
+	const { s8 } = workspace;
+	const metrics = [workspace.bmeta, workspace.bmetb, workspace.bmetc, workspace.bmetd];
+	const dmm = new Float64Array(candidates.length).fill(1e30);
+	let dmin = 1e30;
+	let best = -1;
+	let pbest = 0;
+	for (let k = 0; k < candidates.length; k++) {
+		const cand = candidates[k];
+		if (!cand) continue;
+		// Distance: sum of |LLR| over the bits where the hard decision disagrees.
+		let dm = Infinity;
+		for (const metric of metrics) {
+			let d = 0;
+			for (let i = 0; i < N_LDPC; i++) {
+				const v = LLR_SCALE * metric[i]!;
+				if ((v >= 0 ? 1 : 0) !== cand.cw[i]) d += Math.abs(v);
+			}
+			if (d < dm) dm = d;
+		}
+		dmm[k] = dm;
+		if (dm < dmin) {
+			dmin = dm;
+			best = k;
+			pbest = 0;
+			for (let i = 0; i < NN; i++) pbest += s8[cand.tones[i]! * NN + i]! ** 2;
+		}
+	}
+	if (best < 0) return null;
+
+	let dmin2 = 1e30;
+	for (let k = 0; k < dmm.length; k++) {
+		if (k !== best && dmm[k]! < dmin2) dmin2 = dmm[k]!;
+	}
+	if (dmin > 100.0 || dmin2 / dmin < 1.3) return null;
+
+	const msg = a7MessageText(candidates[best]!, call1, call2);
+	if (!msg) return null;
+	if (msg.startsWith("CQ ") && isStandardCall(call2) && grid4 === "") return null;
+	if (msg.startsWith("QU1RK ")) return null;
+
+	const arg = pbest / xbase / 3.0e6 - 1.0;
+	const snr = arg > 0 ? Math.max(MIN_SNR, 10.0 * Math.log10(arg) - 27.0) : MIN_SNR;
+	return { msg, freq, dt: (ibest - 1) * DT2 - 0.5, snr };
 }
 
 function acceptCodeword(

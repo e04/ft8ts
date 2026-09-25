@@ -1336,7 +1336,7 @@ function callok(call) {
     if (call[0] === "Q")
         return false;
     let i0 = n - 1;
-    while (i0 >= 0 && !isDigit(call[i0]))
+    while (i0 >= 0 && !isDigit$1(call[i0]))
         i0--;
     if (i0 !== 1 && i0 !== 2)
         return false;
@@ -1346,7 +1346,7 @@ function callok(call) {
         return false;
     return /^[A-Z]*$/.test(sfx);
 }
-function isDigit(c) {
+function isDigit$1(c) {
     return c >= "0" && c <= "9";
 }
 function toGrid4(igrid4) {
@@ -2866,7 +2866,7 @@ function appendType0Suffix(bits, n3) {
  * - If the first word is "CQ" and there are ≥3 words and the 3rd word is a
  *   valid base callsign, merge words 1+2 into "CQ_<word2>" and shift the rest.
  */
-function split77(msg) {
+function split77$1(msg) {
     const parts = msg.trim().toUpperCase().replace(/\s+/g, " ").split(" ").filter(Boolean);
     if (parts.length >= 3 && parts[0] === "CQ") {
         // Check if word 3 (index 2) is a valid base callsign
@@ -2881,7 +2881,7 @@ function split77(msg) {
     return parts;
 }
 function pack77(msg) {
-    const parts = split77(msg);
+    const parts = split77$1(msg);
     if (parts.length < 1)
         throw new Error("Empty message");
     const dxpedition = tryPackType01(parts);
@@ -3022,7 +3022,7 @@ function tryPackWsprType1(parts) {
         return null;
     if (!parseCallsign(call).isStandard)
         return null;
-    if (!isGrid4(grid4))
+    if (!isGrid4$1(grid4))
         return null;
     const idbm = packDbm(dbmWord);
     if (idbm === null)
@@ -3162,7 +3162,7 @@ function tryPackType1(parts) {
     else {
         // Check whether wLast is a grid, report, or special
         const lastUpper = wLast.toUpperCase();
-        if (isGrid4(lastUpper)) {
+        if (isGrid4$1(lastUpper)) {
             igrid4 = packgrid4(lastUpper);
             ir = parts.length === 4 && parts[2] === "R" ? 1 : 0;
         }
@@ -3211,7 +3211,7 @@ function tryPackType1(parts) {
     appendBits(bits, i3, 3);
     return bits;
 }
-function isGrid4(s) {
+function isGrid4$1(s) {
     return (s.length === 4 &&
         s[0] >= "A" &&
         s[0] <= "R" &&
@@ -3684,8 +3684,359 @@ function encode(msg, options = {}) {
     return generateFT4Waveform(encodeMessage(msg), options);
 }
 
+/**
+ * Hash call table – TypeScript port of the hash call storage from packjt77.f90
+ *
+ * In FT8, nonstandard callsigns are transmitted as hashes (10-, 12-, or 22-bit).
+ * When a full callsign is decoded from a standard message, it is stored in this
+ * table so that future hashed references to it can be resolved.
+ *
+ * Mirrors Fortran: save_hash_call, hash10, hash12, hash22, ihashcall
+ */
+const MAGIC = 47055833459n;
+const MAX_HASH22_ENTRIES = 1000;
+function ihashcall(c0, m) {
+    const s = c0.padEnd(11, " ").slice(0, 11).toUpperCase();
+    let n8 = 0n;
+    for (let i = 0; i < 11; i++) {
+        const j = C38.indexOf(s[i] ?? " ");
+        n8 = 38n * n8 + BigInt(j < 0 ? 0 : j);
+    }
+    const prod = BigInt.asUintN(64, MAGIC * n8);
+    return Number(prod >> BigInt(64 - m)) & ((1 << m) - 1);
+}
+/**
+ * Maintains a callsign ↔ hash lookup table for resolving hashed FT8 callsigns.
+ *
+ * Usage:
+ * ```ts
+ * const book = new HashCallBook();
+ * const decoded = decodeFT8(samples, { sampleRate, hashCallBook: book });
+ * // `book` now contains callsigns learned from decoded messages.
+ * // Subsequent calls reuse the same book to resolve hashed callsigns:
+ * const decoded2 = decodeFT8(samples2, { sampleRate, hashCallBook: book });
+ * ```
+ *
+ * You can also pre-populate the book with known callsigns:
+ * ```ts
+ * book.save("W9XYZ");
+ * book.save("PJ4/K1ABC");
+ * ```
+ */
+class HashCallBook {
+    calls10 = new Map();
+    calls12 = new Map();
+    hash22Entries = [];
+    /**
+     * Store a callsign in all three hash tables (10, 12, 22-bit).
+     * Strips angle brackets if present. Ignores `<...>` and blank/short strings.
+     */
+    save(callsign) {
+        let cw = callsign.trim().toUpperCase();
+        if (cw === "" || cw === "<...>")
+            return;
+        if (cw.startsWith("<"))
+            cw = cw.slice(1);
+        const gt = cw.indexOf(">");
+        if (gt >= 0)
+            cw = cw.slice(0, gt);
+        cw = cw.trim();
+        if (cw.length < 3)
+            return;
+        const n10 = ihashcall(cw, 10);
+        if (n10 >= 0 && n10 <= 1023)
+            this.calls10.set(n10, cw);
+        const n12 = ihashcall(cw, 12);
+        if (n12 >= 0 && n12 <= 4095)
+            this.calls12.set(n12, cw);
+        const n22 = ihashcall(cw, 22);
+        const existing = this.hash22Entries.findIndex((e) => e.hash === n22);
+        if (existing >= 0) {
+            this.hash22Entries[existing].call = cw;
+        }
+        else {
+            if (this.hash22Entries.length >= MAX_HASH22_ENTRIES) {
+                this.hash22Entries.pop();
+            }
+            this.hash22Entries.unshift({ hash: n22, call: cw });
+        }
+    }
+    /** Look up a callsign by its 10-bit hash. Returns `null` if not found. */
+    lookup10(n10) {
+        if (n10 < 0 || n10 > 1023)
+            return null;
+        return this.calls10.get(n10) ?? null;
+    }
+    /** Look up a callsign by its 12-bit hash. Returns `null` if not found. */
+    lookup12(n12) {
+        if (n12 < 0 || n12 > 4095)
+            return null;
+        return this.calls12.get(n12) ?? null;
+    }
+    /** Look up a callsign by its 22-bit hash. Returns `null` if not found. */
+    lookup22(n22) {
+        const entry = this.hash22Entries.find((e) => e.hash === n22);
+        return entry?.call ?? null;
+    }
+    /** Number of entries in the 22-bit hash table. */
+    get size() {
+        return this.hash22Entries.length;
+    }
+    /** Remove all stored entries. */
+    clear() {
+        this.calls10.clear();
+        this.calls12.clear();
+        this.hash22Entries.length = 0;
+    }
+}
+
+// Port of the "a7" decode table and candidate messages of WSJT-X v3.0.1
+// (ft8_a7.f90: ft8_a7_save and the message list of ft8_a7d).
+/** Maximum number of decodes saved per slot (MAXDEC). */
+const MAX_ENTRIES = 200;
+const SLOT_MS = 15_000;
+/** Number of candidate messages tried for each saved decode. */
+const NUM_MESSAGES = 206;
+/**
+ * Decodes of recent FT8 slots, used for "a7" decoding: a station decoded 30 s
+ * earlier is looked for again at the same frequency with the messages it is
+ * likely to send next.
+ *
+ * Pass the same instance to consecutive `decodeFT8` calls together with
+ * `slotStart`:
+ * ```ts
+ * const history = new FT8History();
+ * const decoded = decodeFT8(samples, { depth: 3, history, slotStart: Date.now() });
+ * ```
+ */
+class FT8History {
+    /** Saved decodes keyed by slot number, floor(ms since epoch / 15000). */
+    slots = new Map();
+    /** Remove all saved decodes. */
+    clear() {
+        this.slots.clear();
+    }
+    /**
+     * Start a new tally for `slot`, replacing one saved by an earlier decode of
+     * the same slot, and return the tally of the previous slot of the same
+     * sequence (30 s earlier).
+     */
+    beginSlot(slot) {
+        for (const key of this.slots.keys()) {
+            if (key < slot - 2)
+                this.slots.delete(key);
+        }
+        this.slots.set(slot, []);
+        return this.slots.get(slot - 2) ?? [];
+    }
+    /** Save a decode of `slot` (ft8_a7_save). `dt` and `freq` are as reported to the user. */
+    save(slot, dt, freq, msg) {
+        if (msg.includes("/") || msg.includes("<"))
+            return;
+        const { words, lengths } = split77(msg);
+        if (words.length < 1 || words[0].startsWith("CQ_"))
+            return;
+        const tally = this.slots.get(slot);
+        if (!tally || tally.length >= MAX_ENTRIES)
+            return;
+        const [w1, w2 = "", w3 = ""] = words;
+        let entry = `${w1} ${w2}`.trim();
+        if (w1 === "CQ" && lengths[1] <= 2)
+            entry = `CQ ${w2} ${w3}`.trim();
+        const last = words[words.length - 1];
+        if (isGrid4(last.slice(0, 4)))
+            entry = `${entry} ${last}`;
+        tally.push({ dt, freq, msg: entry });
+    }
+    /**
+     * Whether a decode already saved for `slot` comes from the station of
+     * `entry` (saved for slot - 2), so that no a7 decode should be tried for it.
+     */
+    supersedes(slot, entry) {
+        for (const cur of this.slots.get(slot) ?? []) {
+            const call2 = split77(cur.msg).words[1] ?? "";
+            if (Math.abs(cur.freq - entry.freq) <= 3.0 && entry.msg.indexOf(` ${call2}`) >= 2) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
+/** Slot number of a time within a 15 s FT8 slot. */
+function slotNumber(time) {
+    const ms = typeof time === "number" ? time : time.getTime();
+    return Math.floor(ms / SLOT_MS);
+}
+/**
+ * The message candidates for an a7 decode of `entry` (ft8_a7d), with the
+ * callsigns and grid they were built from. Messages that cannot be packed are
+ * `null`.
+ */
+function a7Candidates(entry) {
+    const i1 = entry.msg.indexOf(" ");
+    const call1 = (i1 < 0 ? entry.msg : entry.msg.slice(0, i1)).slice(0, 12);
+    const rest = i1 < 0 ? "" : entry.msg.slice(i1 + 1);
+    const i2 = rest.indexOf(" ");
+    const call2 = (i2 < 0 ? rest : rest.slice(0, i2)).slice(0, 12);
+    let grid4 = i2 < 0 ? "" : rest.slice(i2 + 1, i2 + 5);
+    if (grid4 === "RR73" || grid4.includes("+") || grid4.includes("-"))
+        grid4 = "";
+    const candidates = a7Messages(call1, call2, grid4).map((msg) => {
+        try {
+            const bits77 = pack77(msg);
+            const cw = encode174_91(bits77);
+            return { bits77, cw, tones: getTones$2(cw) };
+        }
+        catch {
+            return null;
+        }
+    });
+    return { call1, call2, grid4, candidates };
+}
+/** The message a candidate decodes to, with hashed callsigns resolved (genft8 `msgsent`). */
+function a7MessageText(candidate, call1, call2) {
+    const book = new HashCallBook();
+    for (const call of [call1, call2, "QU1RK"])
+        book.save(call);
+    const { msg, success } = unpack77(candidate.bits77, book);
+    return success ? msg : null;
+}
+/** Whether `call` is a standard callsign (stdcall in WSJT-X). */
+function isStandardCall(call) {
+    const n = call.length;
+    let iarea = n - 1;
+    while (iarea >= 1 && !isDigit(call[iarea]))
+        iarea--;
+    if (iarea < 1 || iarea > 2)
+        return false;
+    let npdig = 0;
+    let nplet = 0;
+    for (let i = 0; i < iarea; i++) {
+        if (isDigit(call[i]))
+            npdig++;
+        if (isLetter(call[i]))
+            nplet++;
+    }
+    let nslet = 0;
+    for (let i = iarea + 1; i < n; i++) {
+        if (isLetter(call[i]))
+            nslet++;
+    }
+    return nplet > 0 && npdig < iarea && nslet <= 3;
+}
+/**
+ * The 206 messages tried for an a7 decode: "call_1 call_2" alone and with RRR,
+ * RR73, 73, the grid and every report from -50 to +49 (with and without R),
+ * plus "CQ call_2 grid".
+ */
+function a7Messages(call1, call2, grid4) {
+    const std1 = call1 === "CQ" || isStandardCall(call1);
+    const std2 = isStandardCall(call2);
+    const msgs = [];
+    for (let i = 1; i <= NUM_MESSAGES; i++) {
+        let msg = `${call1} ${call2}`;
+        if (call1 === "CQ" && i !== 5)
+            msg = `QU1RK ${call2}`;
+        if (!std1) {
+            if (i === 1 || i >= 6)
+                msg = `<${call1}> ${call2}`;
+            if (i >= 2 && i <= 4)
+                msg = `${call1} <${call2}>`;
+        }
+        else if (!std2) {
+            if (i <= 4 || i === 6)
+                msg = `<${call1}> ${call2}`;
+            if (i >= 7)
+                msg = `${call1} <${call2}>`;
+        }
+        if (i === 2)
+            msg += " RRR";
+        if (i === 3)
+            msg += " RR73";
+        if (i === 4)
+            msg += " 73";
+        if (i === 5) {
+            if (std2) {
+                msg = `CQ ${call2}`;
+                if (call1[2] === "_")
+                    msg = `${call1} ${call2}`;
+                msg += ` ${grid4}`;
+            }
+            else {
+                msg = `CQ ${call2}`;
+            }
+        }
+        if (i === 6 && std2)
+            msg += ` ${grid4}`;
+        if (i >= 7) {
+            const isnr = -50 + Math.trunc((i - 7) / 2);
+            const report = (isnr >= 0 ? "+" : "-") + Math.abs(isnr).toString().padStart(2, "0");
+            msg += i % 2 === 1 ? ` ${report}` : ` R${report}`;
+        }
+        msgs.push(msg.trim());
+    }
+    return msgs;
+}
+/**
+ * Split a message into upper-case words, merging "CQ xxx" into "CQ_xxx" when
+ * the third word is a callsign (split77 in packjt77.f90). `lengths` are the
+ * word lengths before merging.
+ */
+function split77(msg) {
+    const words = msg.toUpperCase().split(" ").filter(Boolean);
+    const lengths = words.map((w) => w.length);
+    if (words.length >= 3 && words[0] === "CQ" && chkcall(words[2])) {
+        words.splice(0, 2, `CQ_${words[1].slice(0, 10)}`);
+    }
+    return { words, lengths };
+}
+/** Whether `w` could be a standard or compound callsign (chkcall.f90). */
+function chkcall(w) {
+    const n1 = w.length;
+    if (n1 > 11 || /[.+\-?]/.test(w))
+        return false;
+    const i0 = w.indexOf("/");
+    if (n1 > 6 && i0 < 0)
+        return false;
+    // Base call of a compound call: the longer part
+    if (Math.max(i0, n1 - i0 - 1) > 6)
+        return false;
+    let bc = w.slice(0, 6);
+    if (i0 >= 1 && i0 <= n1 - 2)
+        bc = i0 <= n1 - i0 - 1 ? w.slice(i0 + 1) : w.slice(0, i0);
+    const nbc = bc.length;
+    if (nbc > 6)
+        return false;
+    if (!isLetter(bc[0] ?? "") && !isLetter(bc[1] ?? ""))
+        return false;
+    if (bc[0] === "Q" && !bc.startsWith("QU1RK"))
+        return false;
+    // Call area digit in the second or third position, followed by 1-3 letters
+    let i1 = -1;
+    if (isDigit(bc[1] ?? ""))
+        i1 = 1;
+    if (isDigit(bc[2] ?? ""))
+        i1 = 2;
+    if (i1 < 0 || i1 === nbc - 1)
+        return false;
+    for (let i = i1 + 1; i < nbc; i++) {
+        if (!isLetter(bc[i]))
+            return false;
+    }
+    return nbc - i1 - 1 <= 3;
+}
+function isGrid4(g) {
+    return /^[A-R]{2}[0-9]{2}$/.test(g);
+}
+function isDigit(c) {
+    return c >= "0" && c <= "9";
+}
+function isLetter(c) {
+    return c >= "A" && c <= "Z";
+}
+
 // Port of the WSJT-X v3.0.1 FT8 decoder (ft8_decode.f90, sync8.f90, ft8b.f90,
-// subtractft8.f90, get_spectrum_baseline.f90).
+// subtractft8.f90, get_spectrum_baseline.f90, ft8_a7.f90).
 const NSPS = 1920;
 const NFFT1 = 2 * NSPS; // 3840
 const NH1 = NFFT1 / 2; // 1920
@@ -3775,19 +4126,37 @@ function decode(samples, options = {}) {
     const maxCandidates = options.maxCandidates ?? 1000;
     const book = options.hashCallBook;
     const contest = options.contest;
+    const history = options.history;
+    if (history && options.slotStart === undefined) {
+        throw new TypeError("decodeFT8: `slotStart` is required when `history` is given");
+    }
+    const slot = options.slotStart === undefined ? 0 : slotNumber(options.slotStart);
+    const previous = history?.beginSlot(slot) ?? [];
     const dd = sampleRate === SAMPLE_RATE
         ? copySamplesToDecodeWindow(samples)
         : resample(samples, sampleRate, SAMPLE_RATE, NMAX);
     const workspace = createDecodeWorkspace();
     const decoded = [];
     const seenMessages = new Set();
+    /** Adds a decode unless its message was already decoded, and saves it for a7. */
+    const addDecode = (d) => {
+        const messageKey = normalizeMessageKey(d.msg);
+        if (seenMessages.has(messageKey))
+            return;
+        seenMessages.add(messageKey);
+        decoded.push(d);
+        history?.save(slot, d.dt, d.freq, d.msg);
+    };
+    let sbase = new Float64Array(NH1 + 1);
     const npass = depth <= 1 ? 2 : 3;
     for (let ipass = 1; ipass <= npass; ipass++) {
         // Pass 1 uses amplitude bit metrics, later passes power metrics.
         const imetric = ipass === 1 ? 1 : 2;
         if (ipass === 3 && decoded.length === 0)
             break;
-        const { candidates, sbase } = sync8(dd, nfa, nfb, syncmin, maxCandidates);
+        const sync = sync8(dd, nfa, nfb, syncmin, maxCandidates);
+        const candidates = sync.candidates;
+        sbase = sync.sbase;
         computeLongSpectrum(dd, workspace);
         // Bands [lo, hi] (Hz) of signals subtracted since the spectrum was computed.
         const staleBands = [];
@@ -3807,17 +4176,27 @@ function decode(samples, options = {}) {
                 continue;
             subtractft8(dd, result.tones, result.freq, result.dtSubtract, workspace);
             staleBands.push(result.freq - SIGNAL_BAND_BELOW, result.freq + SIGNAL_BAND_ABOVE);
-            const messageKey = normalizeMessageKey(result.msg);
-            if (seenMessages.has(messageKey))
-                continue;
-            seenMessages.add(messageKey);
-            decoded.push({
+            addDecode({
                 freq: result.freq,
                 dt: result.dt - 0.5,
                 snr: result.snr,
                 msg: result.msg,
                 sync: cand.sync,
+                ...(result.ap ? { ap: result.ap } : {}),
             });
+        }
+    }
+    // a7: stations decoded 30 s earlier, looked for in the residual signal.
+    if (history && depth >= 3 && previous.length > 0) {
+        computeLongSpectrum(dd, workspace);
+        for (const entry of previous) {
+            if (history.supersedes(slot, entry))
+                continue;
+            const ibin = Math.max(1, Math.round(entry.freq / SYNC_DF));
+            const xbase = 10.0 ** (0.1 * (sbase[ibin] - 40.0));
+            const result = ft8a7d(entry, xbase, workspace);
+            if (result)
+                addDecode({ ...result, sync: 0, ap: 7 });
         }
     }
     return decoded;
@@ -4170,51 +4549,9 @@ function polyfit(xs, ys, nterms) {
 }
 // ── Per-candidate decoding (ft8b.f90) ───────────────────────────────────────
 function ft8b(f1In, xdtIn, xbase, ndepth, imetric, contest, book, workspace) {
-    const { cd0Re, cd0Im, ss, s8 } = workspace;
-    let f1 = f1In;
-    ft8Downsample(f1, workspace);
-    // WSJT-X searches time at the candidate frequency and then frequency at
-    // that time. The candidate frequency can be off by up to half a 3.125 Hz
-    // bin, which biases the time search, so search time and frequency jointly.
-    const i0 = Math.round((xdtIn + 0.5) * FS2);
-    const search = searchTimeFrequency(cd0Re, cd0Im, i0, workspace.syncGrid);
-    let ibest = search.ibest;
-    f1 += search.delf;
-    ft8Downsample(f1, workspace);
-    for (let idt = -4; idt <= 4; idt++) {
-        ss[idt + 4] = sync8d(cd0Re, cd0Im, ibest + idt, COSTAS_SYNC.re, COSTAS_SYNC.im);
-    }
-    let iloc = 0;
-    for (let i = 1; i < 9; i++)
-        if (ss[i] > ss[iloc])
-            iloc = i;
-    ibest += iloc - 4;
+    const { s8 } = workspace;
+    const { freq: f1, ibest, dtSubtract, nsync } = demodulate(f1In, xdtIn, workspace);
     const xdt = (ibest - 1) * DT2;
-    // Sub-sample time estimate for signal subtraction
-    let dx = 0;
-    if (iloc > 0 && iloc < 8) {
-        const ym = ss[iloc - 1];
-        const y0 = ss[iloc];
-        const yp = ss[iloc + 1];
-        const c = yp + ym - 2 * y0;
-        if (c < 0)
-            dx = Math.max(-0.5, Math.min(0.5, (-(yp - ym) / 2 / c) * 1));
-    }
-    const dtSubtract = (ibest + dx - 0.5) * DT2;
-    extractSoftSymbols(ibest, workspace);
-    // Sync quality check: hard sync sum, max 21
-    let nsync = 0;
-    for (let k = 0; k < COSTAS_BLOCKS; k++) {
-        for (const offset of SYNC_TIME_SHIFTS) {
-            let ip = 0;
-            for (let t = 1; t < 8; t++) {
-                if (s8[t * NN + k + offset] > s8[ip * NN + k + offset])
-                    ip = t;
-            }
-            if (ip === COSTAS[k])
-                nsync++;
-        }
-    }
     let nsyncMin = imetric === 2 ? 7 : 6;
     if (ndepth <= 2)
         nsyncMin = 8;
@@ -4267,9 +4604,122 @@ function ft8b(f1In, xdtIn, xbase, ndepth, imetric, contest, book, workspace) {
             return null;
         if (xsnr < MIN_SNR)
             xsnr = MIN_SNR;
-        return { msg: accepted, freq: f1, dt: xdt, dtSubtract, snr: xsnr, tones };
+        const ap = ipass > 5 ? 1 : 0;
+        return { msg: accepted, freq: f1, dt: xdt, dtSubtract, snr: xsnr, tones, ap };
     }
     return null;
+}
+/**
+ * Refine time and frequency of a signal near `f1In` Hz starting near `xdtIn` s
+ * (xdt + 0.5 as in sync8), then extract its soft symbols into the workspace.
+ */
+function demodulate(f1In, xdtIn, workspace) {
+    const { cd0Re, cd0Im, ss, s8 } = workspace;
+    let f1 = f1In;
+    ft8Downsample(f1, workspace);
+    // WSJT-X searches time at the candidate frequency and then frequency at
+    // that time. The candidate frequency can be off by up to half a 3.125 Hz
+    // bin, which biases the time search, so search time and frequency jointly.
+    const i0 = Math.round((xdtIn + 0.5) * FS2);
+    const search = searchTimeFrequency(cd0Re, cd0Im, i0, workspace.syncGrid);
+    let ibest = search.ibest;
+    f1 += search.delf;
+    ft8Downsample(f1, workspace);
+    for (let idt = -4; idt <= 4; idt++) {
+        ss[idt + 4] = sync8d(cd0Re, cd0Im, ibest + idt, COSTAS_SYNC.re, COSTAS_SYNC.im);
+    }
+    let iloc = 0;
+    for (let i = 1; i < 9; i++)
+        if (ss[i] > ss[iloc])
+            iloc = i;
+    ibest += iloc - 4;
+    // Sub-sample time estimate for signal subtraction
+    let dx = 0;
+    if (iloc > 0 && iloc < 8) {
+        const ym = ss[iloc - 1];
+        const y0 = ss[iloc];
+        const yp = ss[iloc + 1];
+        const c = yp + ym - 2 * y0;
+        if (c < 0)
+            dx = Math.max(-0.5, Math.min(0.5, (-(yp - ym) / 2 / c) * 1));
+    }
+    const dtSubtract = (ibest + dx - 0.5) * DT2;
+    extractSoftSymbols(ibest, workspace);
+    // Sync quality: hard sync sum, max 21
+    let nsync = 0;
+    for (let k = 0; k < COSTAS_BLOCKS; k++) {
+        for (const offset of SYNC_TIME_SHIFTS) {
+            let ip = 0;
+            for (let t = 1; t < 8; t++) {
+                if (s8[t * NN + k + offset] > s8[ip * NN + k + offset])
+                    ip = t;
+            }
+            if (ip === COSTAS[k])
+                nsync++;
+        }
+    }
+    return { freq: f1, ibest, dtSubtract, nsync };
+}
+// ── a7 decoding (ft8_a7.f90) ────────────────────────────────────────────────
+/**
+ * Look for the station of `entry`, decoded 30 s earlier, at the same
+ * frequency and time: the candidate message closest to the soft symbols wins
+ * if it is clearly closer than the runner-up (ft8_a7d).
+ */
+function ft8a7d(entry, xbase, workspace) {
+    const { call1, call2, grid4, candidates } = a7Candidates(entry);
+    const { freq, ibest } = demodulate(entry.freq, entry.dt, workspace);
+    buildBitMetrics(1, workspace);
+    const { s8 } = workspace;
+    const metrics = [workspace.bmeta, workspace.bmetb, workspace.bmetc, workspace.bmetd];
+    const dmm = new Float64Array(candidates.length).fill(1e30);
+    let dmin = 1e30;
+    let best = -1;
+    let pbest = 0;
+    for (let k = 0; k < candidates.length; k++) {
+        const cand = candidates[k];
+        if (!cand)
+            continue;
+        // Distance: sum of |LLR| over the bits where the hard decision disagrees.
+        let dm = Infinity;
+        for (const metric of metrics) {
+            let d = 0;
+            for (let i = 0; i < N_LDPC; i++) {
+                const v = LLR_SCALE * metric[i];
+                if ((v >= 0 ? 1 : 0) !== cand.cw[i])
+                    d += Math.abs(v);
+            }
+            if (d < dm)
+                dm = d;
+        }
+        dmm[k] = dm;
+        if (dm < dmin) {
+            dmin = dm;
+            best = k;
+            pbest = 0;
+            for (let i = 0; i < NN; i++)
+                pbest += s8[cand.tones[i] * NN + i] ** 2;
+        }
+    }
+    if (best < 0)
+        return null;
+    let dmin2 = 1e30;
+    for (let k = 0; k < dmm.length; k++) {
+        if (k !== best && dmm[k] < dmin2)
+            dmin2 = dmm[k];
+    }
+    if (dmin > 100.0 || dmin2 / dmin < 1.3)
+        return null;
+    const msg = a7MessageText(candidates[best], call1, call2);
+    if (!msg)
+        return null;
+    if (msg.startsWith("CQ ") && isStandardCall(call2) && grid4 === "")
+        return null;
+    if (msg.startsWith("QU1RK "))
+        return null;
+    const arg = pbest / xbase / 3.0e6 - 1.0;
+    const snr = arg > 0 ? Math.max(MIN_SNR, 10.0 * Math.log10(arg) - 27.0) : MIN_SNR;
+    return { msg, freq, dt: (ibest - 1) * DT2 - 0.5, snr };
 }
 function acceptCodeword(result, contest, book) {
     if (result.nharderrors < 0 || result.nharderrors > MAX_HARD_ERRORS)
@@ -4878,111 +5328,5 @@ function resample(input, fromRate, toRate, outLen) {
     return out;
 }
 
-/**
- * Hash call table – TypeScript port of the hash call storage from packjt77.f90
- *
- * In FT8, nonstandard callsigns are transmitted as hashes (10-, 12-, or 22-bit).
- * When a full callsign is decoded from a standard message, it is stored in this
- * table so that future hashed references to it can be resolved.
- *
- * Mirrors Fortran: save_hash_call, hash10, hash12, hash22, ihashcall
- */
-const MAGIC = 47055833459n;
-const MAX_HASH22_ENTRIES = 1000;
-function ihashcall(c0, m) {
-    const s = c0.padEnd(11, " ").slice(0, 11).toUpperCase();
-    let n8 = 0n;
-    for (let i = 0; i < 11; i++) {
-        const j = C38.indexOf(s[i] ?? " ");
-        n8 = 38n * n8 + BigInt(j < 0 ? 0 : j);
-    }
-    const prod = BigInt.asUintN(64, MAGIC * n8);
-    return Number(prod >> BigInt(64 - m)) & ((1 << m) - 1);
-}
-/**
- * Maintains a callsign ↔ hash lookup table for resolving hashed FT8 callsigns.
- *
- * Usage:
- * ```ts
- * const book = new HashCallBook();
- * const decoded = decodeFT8(samples, { sampleRate, hashCallBook: book });
- * // `book` now contains callsigns learned from decoded messages.
- * // Subsequent calls reuse the same book to resolve hashed callsigns:
- * const decoded2 = decodeFT8(samples2, { sampleRate, hashCallBook: book });
- * ```
- *
- * You can also pre-populate the book with known callsigns:
- * ```ts
- * book.save("W9XYZ");
- * book.save("PJ4/K1ABC");
- * ```
- */
-class HashCallBook {
-    calls10 = new Map();
-    calls12 = new Map();
-    hash22Entries = [];
-    /**
-     * Store a callsign in all three hash tables (10, 12, 22-bit).
-     * Strips angle brackets if present. Ignores `<...>` and blank/short strings.
-     */
-    save(callsign) {
-        let cw = callsign.trim().toUpperCase();
-        if (cw === "" || cw === "<...>")
-            return;
-        if (cw.startsWith("<"))
-            cw = cw.slice(1);
-        const gt = cw.indexOf(">");
-        if (gt >= 0)
-            cw = cw.slice(0, gt);
-        cw = cw.trim();
-        if (cw.length < 3)
-            return;
-        const n10 = ihashcall(cw, 10);
-        if (n10 >= 0 && n10 <= 1023)
-            this.calls10.set(n10, cw);
-        const n12 = ihashcall(cw, 12);
-        if (n12 >= 0 && n12 <= 4095)
-            this.calls12.set(n12, cw);
-        const n22 = ihashcall(cw, 22);
-        const existing = this.hash22Entries.findIndex((e) => e.hash === n22);
-        if (existing >= 0) {
-            this.hash22Entries[existing].call = cw;
-        }
-        else {
-            if (this.hash22Entries.length >= MAX_HASH22_ENTRIES) {
-                this.hash22Entries.pop();
-            }
-            this.hash22Entries.unshift({ hash: n22, call: cw });
-        }
-    }
-    /** Look up a callsign by its 10-bit hash. Returns `null` if not found. */
-    lookup10(n10) {
-        if (n10 < 0 || n10 > 1023)
-            return null;
-        return this.calls10.get(n10) ?? null;
-    }
-    /** Look up a callsign by its 12-bit hash. Returns `null` if not found. */
-    lookup12(n12) {
-        if (n12 < 0 || n12 > 4095)
-            return null;
-        return this.calls12.get(n12) ?? null;
-    }
-    /** Look up a callsign by its 22-bit hash. Returns `null` if not found. */
-    lookup22(n22) {
-        const entry = this.hash22Entries.find((e) => e.hash === n22);
-        return entry?.call ?? null;
-    }
-    /** Number of entries in the 22-bit hash table. */
-    get size() {
-        return this.hash22Entries.length;
-    }
-    /** Remove all stored entries. */
-    clear() {
-        this.calls10.clear();
-        this.calls12.clear();
-        this.hash22Entries.length = 0;
-    }
-}
-
-export { HashCallBook, decode$1 as decodeFT4, decode as decodeFT8, encode as encodeFT4, encode$1 as encodeFT8 };
+export { FT8History, HashCallBook, decode$1 as decodeFT4, decode as decodeFT8, encode as encodeFT4, encode$1 as encodeFT8 };
 //# sourceMappingURL=ft8ts.mjs.map
