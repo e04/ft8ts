@@ -168,7 +168,31 @@ function unpack28(n28: number, book: HashCallBook | undefined): { call: string; 
 
 	const call = (A1[i1]! + A2[i2]! + A3[i3]! + A4[i4]! + A4[i5]! + A4[i6]!).trim();
 
-	return { call, success: call.length > 0 };
+	return { call, success: callok(call) };
+}
+
+/**
+ * Plausibility check for a standard callsign (callok in packjt77.f90): at least
+ * three characters, not starting with Q, the last digit (call area) in the second
+ * or third position, a prefix containing a letter and an all-letter suffix.
+ */
+function callok(call: string): boolean {
+	const n = call.length;
+	if (n < 3) return false;
+	if (call[0] === "Q") return false;
+
+	let i0 = n - 1;
+	while (i0 >= 0 && !isDigit(call[i0]!)) i0--;
+	if (i0 !== 1 && i0 !== 2) return false;
+
+	const pfx = call.slice(0, i0);
+	const sfx = call.slice(i0 + 1);
+	if (!/[A-Z]/.test(pfx)) return false;
+	return /^[A-Z]*$/.test(sfx);
+}
+
+function isDigit(c: string): boolean {
+	return c >= "0" && c <= "9";
 }
 
 function toGrid4(igrid4: number): { grid: string; success: boolean } {

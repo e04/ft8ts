@@ -187,44 +187,6 @@ const MAX28 = 268435456; // 2^28
 const MAXGRID4 = 32400;
 
 /**
- * CRC-14 computation and checking, shared between encoder and decoder.
- * Polynomial: 0x2757 (x^14 + x^13 + x^10 + x^9 + x^8 + x^6 + x^4 + x^2 + x + 1)
- */
-function computeCRC14(msg77) {
-    const poly = 0x2757;
-    let crc = 0;
-    const bitArray = [...msg77, 0, 0, 0, ...new Array(16).fill(0)];
-    for (let bit = 0; bit < 96; bit++) {
-        const nextBit = bitArray[bit];
-        if ((crc & 0x2000) !== 0) {
-            crc = ((crc << 1) | nextBit) ^ poly;
-        }
-        else {
-            crc = (crc << 1) | nextBit;
-        }
-        crc &= 0x3fff;
-    }
-    return crc;
-}
-/**
- * Check CRC-14 of a 91-bit decoded message (77 message + 14 CRC).
- * Returns true if CRC is valid.
- */
-function checkCRC14(bits91) {
-    const msg77 = bits91.slice(0, 77);
-    const receivedCRC = bitsToInt(bits91, 77, 14);
-    const computedCRC = computeCRC14(msg77);
-    return receivedCRC === computedCRC;
-}
-function bitsToInt(bits, offset, count) {
-    let val = 0;
-    for (let i = 0; i < count; i++) {
-        val = (val << 1) | (bits[offset + i] ?? 0);
-    }
-    return val;
-}
-
-/**
  * LDPC (174,91) parity check matrix data from ldpc_174_91_c_parity.f90
  *
  * Mn[j] = list of 3 check-node indices (1-based) for bit j  (j=0..173)
@@ -290,7 +252,6 @@ const nrwData = [
     6, 7, 6, 6, 6, 7, 7, 6, 6, 6, 6, 7, 7, 6, 6, 6, 6, 7, 6, 6, 6, 7, 6, 6, 6, 6, 7, 6, 6, 6, 7, 6, 6,
     6, 7, 7, 6, 6, 7, 6, 6, 6, 6, 6, 6, 6, 7, 6, 6, 6,
 ];
-const ncw = 3;
 /** Mn[j] = check indices (0-based) for bit j (0..173). Each entry has exactly 3 elements. */
 const Mn = [];
 for (let j = 0; j < 174; j++) {
@@ -311,396 +272,476 @@ for (let i = 0; i < 83; i++) {
 }
 
 /**
- * LDPC (174,91) Belief Propagation decoder for FT8.
- * Port of bpdecode174_91.f90 and decode174_91.f90.
+ * LDPC (174,91) decoder for FT8/FT4.
+ * Port of decode174_91.f90 (hybrid BP/OSD) and osd174_91.f90 from WSJT-X.
  */
+const N = N_LDPC;
 const KK = 91;
-const M_LDPC = N_LDPC - KK; // 83
-function platanh(x) {
-    if (x > 0.9999999)
-        return 18.71;
-    if (x < -0.9999999)
-        return -18.71;
-    return 0.5 * Math.log((1 + x) / (1 - x));
-}
-/**
- * BP decoder for (174,91) LDPC code.
- * llr: log-likelihood ratios (174 values, positive = bit more likely 0)
- * apmask: AP mask (174 values, 1 = a priori bit, don't update from check messages)
- * maxIterations: max BP iterations
- * Returns null if decoding fails, otherwise { message91, cw, nharderrors }
- */
-function bpDecode174_91(llr, apmask, maxIterations) {
-    const N = N_LDPC;
-    const M = M_LDPC;
-    const tov = new Float64Array(ncw * N);
-    const toc = new Float64Array(7 * M);
-    const tanhtoc = new Float64Array(7 * M);
-    const zn = new Float64Array(N);
-    const cw = new Int8Array(N);
-    // Initialize messages to checks
-    for (let j = 0; j < M; j++) {
-        const w = nrw[j];
-        for (let i = 0; i < w; i++) {
-            toc[i * M + j] = llr[Nm[j][i]];
+const M_LDPC = N - KK; // 83
+const MAX_ITERATIONS = 30;
+// ── Tanner graph as flat edge arrays ────────────────────────────────────────
+/** Edges of check j are CHECK_START[j]..CHECK_START[j+1]-1. */
+const CHECK_START = new Int32Array(M_LDPC + 1);
+/** Variable node of each edge. */
+const EDGE_VAR = new Int32Array(3 * N);
+/** The three edges of variable i are VAR_EDGES[3i..3i+2] (Mn order). */
+const VAR_EDGES = new Int32Array(3 * N);
+(() => {
+    let e = 0;
+    for (let j = 0; j < M_LDPC; j++) {
+        CHECK_START[j] = e;
+        for (let i = 0; i < nrw[j]; i++)
+            EDGE_VAR[e++] = Nm[j][i];
+    }
+    CHECK_START[M_LDPC] = e;
+    for (let v = 0; v < N; v++) {
+        for (let t = 0; t < 3; t++) {
+            const chk = Mn[v][t];
+            for (let k = CHECK_START[chk]; k < CHECK_START[chk + 1]; k++) {
+                if (EDGE_VAR[k] === v)
+                    VAR_EDGES[3 * v + t] = k;
+            }
         }
     }
-    let nclast = 0;
+})();
+const NEDGES = CHECK_START[M_LDPC];
+const tov = new Float64Array(NEDGES);
+const toc = new Float64Array(NEDGES);
+const tanhtoc = new Float64Array(NEDGES);
+const zn = new Float64Array(N);
+const zsum = new Float64Array(N);
+const zsave = new Float64Array(3 * N);
+const hardBits = new Int8Array(N);
+/** Piecewise-linear atanh approximation used by WSJT-X (platanh.f90). */
+function platanh(x) {
+    const z = x < 0 ? -x : x;
+    let y;
+    if (z <= 0.664)
+        return x / 0.83;
+    if (z <= 0.9217)
+        y = (z - 0.4064) / 0.322;
+    else if (z <= 0.9951)
+        y = (z - 0.8378) / 0.0524;
+    else if (z <= 0.9998)
+        y = (z - 0.9914) / 0.0012;
+    else
+        y = 7.0;
+    return x < 0 ? -y : y;
+}
+/** CRC-14 check on bits 0..90 of `bits` (77 message bits followed by 14 CRC bits). */
+function crc14Matches(bits) {
+    const poly = 0x2757;
+    let crc = 0;
+    for (let bit = 0; bit < 96; bit++) {
+        const nextBit = bit < 77 ? bits[bit] : 0;
+        if ((crc & 0x2000) !== 0) {
+            crc = ((crc << 1) | nextBit) ^ poly;
+        }
+        else {
+            crc = (crc << 1) | nextBit;
+        }
+        crc &= 0x3fff;
+    }
+    let received = 0;
+    for (let i = 77; i < 91; i++)
+        received = (received << 1) | bits[i];
+    return received === crc;
+}
+function distanceToHardDecision(llr, cw) {
+    let dmin = 0;
+    for (let i = 0; i < N; i++) {
+        const hard = llr[i] >= 0 ? 1 : 0;
+        if (hard !== cw[i])
+            dmin += Math.abs(llr[i]);
+    }
+    return dmin;
+}
+/**
+ * Hybrid BP/OSD decoder for the (174,91) code (decode174_91.f90).
+ *
+ * maxosd < 0: BP only
+ * maxosd = 0: BP, then OSD once with the channel LLRs
+ * maxosd > 0: BP, then OSD up to `maxosd` times (max 3) with the accumulated
+ *             BP soft outputs of iterations 1..maxosd
+ * norder: OSD search depth (osd174_91 `ndeep`)
+ */
+function decode174_91(llr, apmask, maxosd, norder = 2) {
+    if (maxosd > 3)
+        maxosd = 3;
+    let nosd = 0;
+    if (maxosd === 0) {
+        nosd = 1;
+        zsave.set(llr);
+    }
+    else if (maxosd > 0) {
+        nosd = maxosd;
+    }
+    tov.fill(0);
+    zsum.fill(0);
     let ncnt = 0;
-    for (let iter = 0; iter <= maxIterations; iter++) {
-        // Update bit LLRs
+    let nclast = 0;
+    for (let iter = 0; iter <= MAX_ITERATIONS; iter++) {
         for (let i = 0; i < N; i++) {
+            let z = llr[i];
             if (apmask[i] !== 1) {
-                let sum = 0;
-                for (let k = 0; k < ncw; k++)
-                    sum += tov[k * N + i];
-                zn[i] = llr[i] + sum;
+                const e = 3 * i;
+                z += tov[VAR_EDGES[e]] + tov[VAR_EDGES[e + 1]] + tov[VAR_EDGES[e + 2]];
             }
-            else {
-                zn[i] = llr[i];
-            }
+            zn[i] = z;
+            zsum[i] = zsum[i] + z;
+            hardBits[i] = z > 0 ? 1 : 0;
         }
-        // Hard decision
-        for (let i = 0; i < N; i++)
-            cw[i] = zn[i] > 0 ? 1 : 0;
-        // Check parity
+        if (iter > 0 && iter <= maxosd)
+            zsave.set(zsum, (iter - 1) * N);
         let ncheck = 0;
-        for (let i = 0; i < M; i++) {
-            const w = nrw[i];
-            let s = 0;
-            for (let k = 0; k < w; k++)
-                s += cw[Nm[i][k]];
-            if (s % 2 !== 0)
-                ncheck++;
+        for (let j = 0; j < M_LDPC; j++) {
+            let parity = 0;
+            for (let e = CHECK_START[j]; e < CHECK_START[j + 1]; e++)
+                parity ^= hardBits[EDGE_VAR[e]];
+            ncheck += parity;
         }
-        if (ncheck === 0) {
-            const bits91 = Array.from(cw.slice(0, KK));
-            if (checkCRC14(bits91)) {
-                let nharderrors = 0;
-                for (let i = 0; i < N; i++) {
-                    if ((2 * cw[i] - 1) * llr[i] < 0)
-                        nharderrors++;
-                }
-                return {
-                    message91: bits91,
-                    cw: Array.from(cw),
-                    nharderrors,
-                    dmin: 0,
-                    ntype: 1,
-                };
+        if (ncheck === 0 && crc14Matches(hardBits)) {
+            let nharderrors = 0;
+            for (let i = 0; i < N; i++) {
+                if ((2 * hardBits[i] - 1) * llr[i] < 0)
+                    nharderrors++;
             }
+            return {
+                message91: Array.from(hardBits.subarray(0, KK)),
+                cw: Array.from(hardBits),
+                nharderrors,
+                dmin: distanceToHardDecision(llr, hardBits),
+                ntype: 1,
+            };
         }
-        // Early stopping
         if (iter > 0) {
-            const nd = ncheck - nclast;
-            if (nd < 0) {
+            if (ncheck - nclast < 0) {
                 ncnt = 0;
             }
             else {
                 ncnt++;
             }
             if (ncnt >= 5 && iter >= 10 && ncheck > 15)
-                return null;
+                break;
         }
         nclast = ncheck;
-        // Send messages from bits to check nodes
-        for (let j = 0; j < M; j++) {
-            const w = nrw[j];
-            for (let i = 0; i < w; i++) {
-                const ibj = Nm[j][i];
-                let val = zn[ibj];
-                for (let kk = 0; kk < ncw; kk++) {
-                    if (Mn[ibj][kk] === j) {
-                        val -= tov[kk * N + ibj];
-                    }
+        // Messages from bits to checks
+        for (let e = 0; e < NEDGES; e++) {
+            const t = zn[EDGE_VAR[e]] - tov[e];
+            toc[e] = t;
+            tanhtoc[e] = Math.tanh(-t / 2);
+        }
+        // Messages from checks to bits
+        for (let j = 0; j < M_LDPC; j++) {
+            const start = CHECK_START[j];
+            const end = CHECK_START[j + 1];
+            for (let e = start; e < end; e++) {
+                let tmn = 1.0;
+                for (let k = start; k < end; k++) {
+                    if (k !== e)
+                        tmn *= tanhtoc[k];
                 }
-                toc[i * M + j] = val;
+                tov[e] = 2 * platanh(-tmn);
             }
         }
-        // Send messages from check nodes to variable nodes
-        for (let i = 0; i < M; i++) {
-            for (let k = 0; k < 7; k++) {
-                tanhtoc[k * M + i] = Math.tanh(-toc[k * M + i] / 2);
-            }
-        }
-        for (let j = 0; j < N; j++) {
-            for (let i = 0; i < ncw; i++) {
-                const ichk = Mn[j][i];
-                const w = nrw[ichk];
-                let Tmn = 1.0;
-                for (let k = 0; k < w; k++) {
-                    if (Nm[ichk][k] !== j) {
-                        Tmn *= tanhtoc[k * M + ichk];
-                    }
-                }
-                tov[i * N + j] = 2 * platanh(-Tmn);
-            }
+    }
+    for (let i = 0; i < nosd; i++) {
+        const osd = osd174_91(zsave.subarray(i * N, (i + 1) * N), apmask, norder);
+        if (osd && osd.nhardmin > 0) {
+            return {
+                message91: osd.cw.slice(0, KK),
+                cw: osd.cw,
+                nharderrors: osd.nhardmin,
+                dmin: distanceToHardDecision(llr, osd.cw),
+                ntype: 2,
+            };
         }
     }
     return null;
 }
+// ── Ordered-statistics decoder ──────────────────────────────────────────────
+/** Number of 32-bit words for a 91-row column bitset. */
+const RW = 3;
+/** Number of 32-bit words for the 83 parity positions. */
+const PW = 3;
 /**
- * Hybrid BP + OSD-like decoder for (174,91) code.
- * Tries BP first, then falls back to OSD approach for deeper decoding.
+ * Generator matrix in column-major bitset form: column c is a 91-bit set of the
+ * information bits whose unit codeword has a 1 in position c.
  */
-function decode174_91(llr, apmask, maxosd) {
-    const maxIterations = 30;
-    // Try BP decoding
-    const bpResult = bpDecode174_91(llr, apmask, maxIterations);
-    if (bpResult)
-        return bpResult;
-    // OSD-0 fallback: try hard-decision with bit flipping for most unreliable bits
-    if (maxosd >= 0) {
-        return osdDecode174_91(llr, apmask, maxosd >= 2 ? 3 : maxosd >= 1 ? 2 : 1);
+const GEN_COLS = buildGeneratorColumns();
+const osdCols = new Int32Array(N * RW);
+const osdIndices = new Int32Array(N);
+const osdAbs = new Float64Array(N);
+const osdAbsP = new Float64Array(N);
+const osdHdecP = new Int8Array(N);
+const osdApP = new Int8Array(N);
+const osdC0 = new Int8Array(N);
+const osdRowParity = new Int32Array(KK * PW);
+const osdOrder = Array.from({ length: N }, (_, i) => i);
+function popcount32(x) {
+    x -= (x >>> 1) & 0x55555555;
+    x = (x & 0x33333333) + ((x >>> 2) & 0x33333333);
+    x = (x + (x >>> 4)) & 0x0f0f0f0f;
+    return Math.imul(x, 0x01010101) >>> 24;
+}
+function paritySum(w0, w1, w2, absP) {
+    let sum = 0;
+    let w = w0;
+    while (w !== 0) {
+        const low = w & -w;
+        sum += absP[KK + 31 - Math.clz32(low)];
+        w ^= low;
     }
-    return null;
+    w = w1;
+    while (w !== 0) {
+        const low = w & -w;
+        sum += absP[KK + 32 + 31 - Math.clz32(low)];
+        w ^= low;
+    }
+    w = w2;
+    while (w !== 0) {
+        const low = w & -w;
+        sum += absP[KK + 64 + 31 - Math.clz32(low)];
+        w ^= low;
+    }
+    return sum;
 }
 /**
- * Simplified OSD decoder for (174,91) code.
- * Uses ordered statistics approach: sort bits by reliability,
- * do Gaussian elimination, try flipping least reliable info bits.
+ * Ordered-statistics decoder for the (174,91) code (osd174_91.f90 with k=91).
+ * Supports ndeep 0..2 (the depths WSJT-X uses for FT8/FT4).
  */
-function osdDecode174_91(llr, apmask, norder) {
-    const N = N_LDPC;
-    const K = KK;
-    const gen = getGenerator();
-    const absllr = new Float64Array(N);
-    for (let i = 0; i < N; i++)
-        absllr[i] = Math.abs(llr[i]);
-    // Sort by reliability (descending)
-    const indices = new Array(N);
-    for (let i = 0; i < N; i++)
-        indices[i] = i;
-    indices.sort((a, b) => absllr[b] - absllr[a]);
-    // Reorder generator matrix columns
-    const genmrb = new Uint8Array(K * N);
-    for (let k = 0; k < K; k++) {
-        const row = k * N;
-        for (let i = 0; i < N; i++) {
-            genmrb[row + i] = gen[row + indices[i]];
-        }
+function osd174_91(llr, apmask, ndeep) {
+    if (ndeep > 2)
+        ndeep = 2;
+    const k = KK;
+    const cols = osdCols;
+    const indices = osdIndices;
+    for (let i = 0; i < N; i++) {
+        osdAbs[i] = Math.abs(llr[i]);
+        osdOrder[i] = i;
     }
-    // Gaussian elimination to get systematic form on the K most-reliable bits
-    const maxPivotCol = Math.min(K + 20, N);
-    for (let id = 0; id < K; id++) {
-        let found = false;
-        const idRow = id * N;
+    osdOrder.sort((a, b) => osdAbs[b] - osdAbs[a]);
+    // Columns of the generator matrix in order of decreasing reliability.
+    for (let i = 0; i < N; i++) {
+        const src = osdOrder[i];
+        indices[i] = src;
+        cols[i * RW] = GEN_COLS[src * RW];
+        cols[i * RW + 1] = GEN_COLS[src * RW + 1];
+        cols[i * RW + 2] = GEN_COLS[src * RW + 2];
+    }
+    // Gaussian elimination: make the first k columns (most reliable) systematic.
+    const maxPivotCol = Math.min(k + 20, N);
+    for (let id = 0; id < k; id++) {
+        const word = id >>> 5;
+        const mask = 1 << (id & 31);
         for (let icol = id; icol < maxPivotCol; icol++) {
-            if (genmrb[idRow + icol] === 1) {
-                if (icol !== id) {
-                    // Swap columns
-                    for (let k = 0; k < K; k++) {
-                        const row = k * N;
-                        const tmp = genmrb[row + id];
-                        genmrb[row + id] = genmrb[row + icol];
-                        genmrb[row + icol] = tmp;
-                    }
-                    const tmp = indices[id];
-                    indices[id] = indices[icol];
-                    indices[icol] = tmp;
+            if ((cols[icol * RW + word] & mask) === 0)
+                continue;
+            if (icol !== id) {
+                for (let w = 0; w < RW; w++) {
+                    const tmp = cols[id * RW + w];
+                    cols[id * RW + w] = cols[icol * RW + w];
+                    cols[icol * RW + w] = tmp;
                 }
-                for (let ii = 0; ii < K; ii++) {
-                    if (ii === id)
-                        continue;
-                    const iiRow = ii * N;
-                    if (genmrb[iiRow + id] === 1) {
-                        for (let c = 0; c < N; c++) {
-                            genmrb[iiRow + c] ^= genmrb[idRow + c];
-                        }
+                const tmp = indices[id];
+                indices[id] = indices[icol];
+                indices[icol] = tmp;
+            }
+            // Rows (other than id) that have a 1 in column id.
+            const s0 = cols[id * RW];
+            const s1 = cols[id * RW + 1];
+            const s2 = cols[id * RW + 2];
+            const r0 = word === 0 ? s0 & ~mask : s0;
+            const r1 = word === 1 ? s1 & ~mask : s1;
+            const r2 = word === 2 ? s2 & ~mask : s2;
+            if ((r0 | r1 | r2) !== 0) {
+                for (let c = 0; c < N; c++) {
+                    if ((cols[c * RW + word] & mask) !== 0) {
+                        cols[c * RW] = cols[c * RW] ^ r0;
+                        cols[c * RW + 1] = cols[c * RW + 1] ^ r1;
+                        cols[c * RW + 2] = cols[c * RW + 2] ^ r2;
                     }
                 }
-                found = true;
-                break;
+            }
+            break;
+        }
+    }
+    // Received word in MRB order.
+    let m0w0 = 0;
+    let m0w1 = 0;
+    let m0w2 = 0;
+    for (let i = 0; i < N; i++) {
+        const src = indices[i];
+        const hard = llr[src] >= 0 ? 1 : 0;
+        osdHdecP[i] = hard;
+        osdAbsP[i] = osdAbs[src];
+        osdApP[i] = apmask[src];
+        if (i < k && hard === 1) {
+            if (i < 32)
+                m0w0 |= 1 << i;
+            else if (i < 64)
+                m0w1 |= 1 << (i - 32);
+            else
+                m0w2 |= 1 << (i - 64);
+        }
+    }
+    // Order-0 codeword and distance.
+    let nhardmin = 0;
+    let dmin = 0;
+    for (let c = 0; c < N; c++) {
+        const bit = (popcount32(m0w0 & cols[c * RW]) +
+            popcount32(m0w1 & cols[c * RW + 1]) +
+            popcount32(m0w2 & cols[c * RW + 2])) &
+            1;
+        osdC0[c] = bit;
+        if (bit !== osdHdecP[c]) {
+            nhardmin++;
+            dmin += osdAbsP[c];
+        }
+    }
+    let bestA = -1;
+    let bestB = -1;
+    if (ndeep > 0) {
+        const npre1 = ndeep >= 2 ? 1 : 0;
+        const ntheta = ndeep === 2 ? 10 : 12;
+        // nt = 40: the screening uses the 40 most reliable parity positions.
+        const NT_MASK1 = 0xff;
+        // Parity part of each (systematic) row, and of the order-0 error pattern.
+        osdRowParity.fill(0);
+        let e0w0 = 0;
+        let e0w1 = 0;
+        let e0w2 = 0;
+        for (let j = 0; j < M_LDPC; j++) {
+            const c = k + j;
+            const pw = j >>> 5;
+            const pmask = 1 << (j & 31);
+            if (osdC0[c] !== osdHdecP[c]) {
+                if (pw === 0)
+                    e0w0 |= pmask;
+                else if (pw === 1)
+                    e0w1 |= pmask;
+                else
+                    e0w2 |= pmask;
+            }
+            for (let w = 0; w < RW; w++) {
+                let bits = cols[c * RW + w];
+                while (bits !== 0) {
+                    const low = bits & -bits;
+                    const row = w * 32 + 31 - Math.clz32(low);
+                    osdRowParity[row * PW + pw] = osdRowParity[row * PW + pw] | pmask;
+                    bits ^= low;
+                }
             }
         }
-        if (!found)
-            return null;
-    }
-    // Hard decisions on reordered received word
-    const hdec = new Int8Array(N);
-    for (let i = 0; i < N; i++) {
-        const idx = indices[i];
-        hdec[i] = llr[idx] >= 0 ? 1 : 0;
-    }
-    const absrx = new Float64Array(N);
-    for (let i = 0; i < N; i++) {
-        absrx[i] = absllr[indices[i]];
-    }
-    // Encode hard decision on MRB (c0): xor selected rows of genmrb.
-    const c0 = new Int8Array(N);
-    for (let i = 0; i < K; i++) {
-        if (hdec[i] !== 1)
-            continue;
-        const row = i * N;
-        for (let j = 0; j < N; j++) {
-            c0[j] ^= genmrb[row + j];
-        }
-    }
-    let dmin = 0;
-    for (let i = 0; i < N; i++) {
-        const x = c0[i] ^ hdec[i];
-        dmin += x * absrx[i];
-    }
-    let bestFlip1 = -1;
-    let bestFlip2 = -1;
-    let bestFlip3 = -1;
-    // Order-1: flip single bits in the info portion
-    for (let i1 = K - 1; i1 >= 0; i1--) {
-        if (apmask[indices[i1]] === 1)
-            continue;
-        const row1 = i1 * N;
-        let dd = 0;
-        for (let j = 0; j < N; j++) {
-            const x = c0[j] ^ genmrb[row1 + j] ^ hdec[j];
-            dd += x * absrx[j];
-        }
-        if (dd < dmin) {
-            dmin = dd;
-            bestFlip1 = i1;
-            bestFlip2 = -1;
-            bestFlip3 = -1;
-        }
-    }
-    // Order-2: flip pairs of least-reliable info bits (limited search)
-    if (norder >= 2) {
-        const ntry = Math.min(64, K);
-        const iMin = Math.max(0, K - ntry);
-        for (let i1 = K - 1; i1 >= iMin; i1--) {
-            if (apmask[indices[i1]] === 1)
+        for (let iflag = k - 1; iflag >= 0; iflag--) {
+            // Every pattern of this iteration contains bit iflag.
+            if (osdApP[iflag] === 1)
                 continue;
-            const row1 = i1 * N;
-            for (let i2 = i1 - 1; i2 >= iMin; i2--) {
-                if (apmask[indices[i2]] === 1)
-                    continue;
-                const row2 = i2 * N;
-                let dd = 0;
-                for (let j = 0; j < N; j++) {
-                    const x = c0[j] ^ genmrb[row1 + j] ^ genmrb[row2 + j] ^ hdec[j];
-                    dd += x * absrx[j];
-                }
+            const s0 = e0w0 ^ osdRowParity[iflag * PW];
+            const s1 = e0w1 ^ osdRowParity[iflag * PW + 1];
+            const s2 = e0w2 ^ osdRowParity[iflag * PW + 2];
+            const d1 = osdAbsP[iflag];
+            let nd1kpt = popcount32(s0) + popcount32(s1 & NT_MASK1) + 1;
+            if (nd1kpt <= ntheta) {
+                const dd = d1 + paritySum(s0, s1, s2, osdAbsP);
                 if (dd < dmin) {
                     dmin = dd;
-                    bestFlip1 = i1;
-                    bestFlip2 = i2;
-                    bestFlip3 = -1;
+                    bestA = iflag;
+                    bestB = -1;
                 }
             }
-        }
-    }
-    if (norder >= 3) {
-        const ntry = Math.min(40, K);
-        const iMin = Math.max(0, K - ntry);
-        for (let i1 = K - 1; i1 >= iMin; i1--) {
-            if (apmask[indices[i1]] === 1)
+            if (npre1 === 0)
                 continue;
-            const row1 = i1 * N;
-            for (let i2 = i1 - 1; i2 >= iMin; i2--) {
-                if (apmask[indices[i2]] === 1)
+            for (let n1 = iflag - 1; n1 >= 0; n1--) {
+                if (osdApP[n1] === 1)
                     continue;
-                const row2 = i2 * N;
-                for (let i3 = i2 - 1; i3 >= iMin; i3--) {
-                    if (apmask[indices[i3]] === 1)
-                        continue;
-                    const row3 = i3 * N;
-                    let dd = 0;
-                    for (let j = 0; j < N; j++) {
-                        const x = c0[j] ^ genmrb[row1 + j] ^ genmrb[row2 + j] ^ genmrb[row3 + j] ^ hdec[j];
-                        dd += x * absrx[j];
-                    }
-                    if (dd < dmin) {
-                        dmin = dd;
-                        bestFlip1 = i1;
-                        bestFlip2 = i2;
-                        bestFlip3 = i3;
-                    }
+                const t0 = s0 ^ osdRowParity[n1 * PW];
+                const t1 = s1 ^ osdRowParity[n1 * PW + 1];
+                nd1kpt = popcount32(t0) + popcount32(t1 & NT_MASK1) + 2;
+                if (nd1kpt > ntheta)
+                    continue;
+                const t2 = s2 ^ osdRowParity[n1 * PW + 2];
+                const dd = d1 + osdAbsP[n1] + paritySum(t0, t1, t2, osdAbsP);
+                if (dd < dmin) {
+                    dmin = dd;
+                    bestA = iflag;
+                    bestB = n1;
                 }
             }
         }
     }
-    const bestCw = new Int8Array(c0);
-    if (bestFlip1 >= 0) {
-        const row1 = bestFlip1 * N;
-        for (let j = 0; j < N; j++)
-            bestCw[j] ^= genmrb[row1 + j];
-        if (bestFlip2 >= 0) {
-            const row2 = bestFlip2 * N;
-            for (let j = 0; j < N; j++)
-                bestCw[j] ^= genmrb[row2 + j];
+    // Build the best codeword: c0 + rows bestA and bestB of the reduced generator.
+    const cwP = osdC0;
+    if (bestA >= 0) {
+        for (const row of [bestA, bestB]) {
+            if (row < 0)
+                continue;
+            const w = row >>> 5;
+            const mask = 1 << (row & 31);
+            for (let c = 0; c < N; c++) {
+                if ((cols[c * RW + w] & mask) !== 0)
+                    cwP[c] = cwP[c] ^ 1;
+            }
         }
-        if (bestFlip3 >= 0) {
-            const row3 = bestFlip3 * N;
-            for (let j = 0; j < N; j++)
-                bestCw[j] ^= genmrb[row3 + j];
-        }
+        nhardmin = 0;
+        for (let c = 0; c < N; c++)
+            if (cwP[c] !== osdHdecP[c])
+                nhardmin++;
     }
-    // Reorder codeword back to original order
-    const finalCw = new Int8Array(N);
-    for (let i = 0; i < N; i++) {
-        finalCw[indices[i]] = bestCw[i];
-    }
-    const bits91 = Array.from(finalCw.slice(0, KK));
-    if (!checkCRC14(bits91))
-        return null;
-    // Compute dmin in original order
-    let dminOrig = 0;
-    let nhe = 0;
-    for (let i = 0; i < N; i++) {
-        const hard = llr[i] >= 0 ? 1 : 0;
-        const x = finalCw[i] ^ hard;
-        nhe += x;
-        dminOrig += x * absllr[i];
-    }
-    return {
-        message91: bits91,
-        cw: Array.from(finalCw),
-        nharderrors: nhe,
-        dmin: dminOrig,
-        ntype: 2,
-    };
+    const cw = new Array(N);
+    for (let i = 0; i < N; i++)
+        cw[indices[i]] = cwP[i];
+    if (!crc14Matches(cw))
+        nhardmin = -nhardmin;
+    return { cw, nhardmin };
 }
-let _generator = null;
-function getGenerator() {
-    if (_generator)
-        return _generator;
-    const K = KK;
-    const N = N_LDPC;
-    const M = M_LDPC;
-    // Build full generator matrix (K×N) where first K columns are identity
-    const gen = new Uint8Array(K * N);
-    for (let i = 0; i < K; i++)
-        gen[i * N + i] = 1;
-    // gHex encodes the M×K generator parity matrix
-    // gen_parity[m][k] = 1 means info bit k contributes to parity bit m
-    for (let m = 0; m < M; m++) {
+function buildGeneratorColumns() {
+    const colsOut = new Int32Array(N * RW);
+    // Identity for the information positions.
+    for (let i = 0; i < KK; i++) {
+        colsOut[i * RW + (i >>> 5)] = 1 << (i & 31);
+    }
+    // gHex encodes the M×K generator parity matrix: parity bit m depends on info bit col.
+    for (let m = 0; m < M_LDPC; m++) {
         const hexStr = gHex[m];
+        const c = KK + m;
         for (let j = 0; j < 23; j++) {
             const val = parseInt(hexStr[j], 16);
             const limit = j === 22 ? 3 : 4;
             for (let jj = 1; jj <= limit; jj++) {
                 const col = j * 4 + jj - 1;
-                if (col < K && (val & (1 << (4 - jj))) !== 0) {
-                    // For info bit `col`, parity bit `m` is set
-                    gen[col * N + K + m] = 1;
+                if (col < KK && (val & (1 << (4 - jj))) !== 0) {
+                    colsOut[c * RW + (col >>> 5)] = colsOut[c * RW + (col >>> 5)] | (1 << (col & 31));
                 }
             }
         }
     }
-    _generator = gen;
-    return gen;
+    return colsOut;
 }
 
 /**
- * Radix-2 Cooley-Tukey FFT for FT8 decoding.
+ * FFT for FT8/FT4 decoding.
+ * Radix-2 Cooley-Tukey for powers of two, mixed-radix Stockham for sizes
+ * with small prime factors (e.g. 3840, 3200, 192000, 72576), and Bluestein
+ * for everything else.
  * Supports real-to-complex, complex-to-complex, and inverse transforms.
  */
 const RADIX2_PLAN_CACHE = new Map();
+const MIXED_RADIX_PLAN_CACHE = new Map();
 const BLUESTEIN_PLAN_CACHE = new Map();
+const MAX_GENERIC_RADIX = 31;
 function fftComplex(re, im, inverse) {
     const n = re.length;
     if (n <= 1)
         return;
     if ((n & (n - 1)) !== 0) {
-        bluestein(re, im, inverse);
+        const plan = getMixedRadixPlan(n);
+        if (plan) {
+            mixedRadix(re, im, inverse, plan);
+        }
+        else {
+            bluestein(re, im, inverse);
+        }
         return;
     }
     const { bitReversed } = getRadix2Plan(n);
@@ -742,6 +783,291 @@ function fftComplex(re, im, inverse) {
     }
     if (inverse) {
         const scale = 1 / n;
+        for (let i = 0; i < n; i++) {
+            re[i] = re[i] * scale;
+            im[i] = im[i] * scale;
+        }
+    }
+}
+function getMixedRadixPlan(n) {
+    const cached = MIXED_RADIX_PLAN_CACHE.get(n);
+    if (cached !== undefined)
+        return cached;
+    const factors = [];
+    let rest = n;
+    while (rest % 4 === 0) {
+        factors.push(4);
+        rest /= 4;
+    }
+    for (let p = 2; p <= MAX_GENERIC_RADIX && rest > 1; p++) {
+        while (rest % p === 0) {
+            factors.push(p);
+            rest /= p;
+        }
+    }
+    if (rest !== 1) {
+        MIXED_RADIX_PLAN_CACHE.set(n, null);
+        return null;
+    }
+    const twRe = new Float64Array(n);
+    const twIm = new Float64Array(n);
+    for (let k = 0; k < n; k++) {
+        const angle = (-2 * Math.PI * k) / n;
+        twRe[k] = Math.cos(angle);
+        twIm[k] = Math.sin(angle);
+    }
+    const maxRadix = Math.max(...factors);
+    const plan = {
+        factors,
+        twRe,
+        twIm,
+        workRe: new Float64Array(n),
+        workIm: new Float64Array(n),
+        vRe: new Float64Array(maxRadix),
+        vIm: new Float64Array(maxRadix),
+    };
+    MIXED_RADIX_PLAN_CACHE.set(n, plan);
+    return plan;
+}
+const SIN_60 = Math.sqrt(3) / 2;
+const COS_72 = Math.cos((2 * Math.PI) / 5);
+const COS_144 = Math.cos((4 * Math.PI) / 5);
+const SIN_72 = Math.sin((2 * Math.PI) / 5);
+const SIN_144 = Math.sin((4 * Math.PI) / 5);
+/**
+ * Stockham autosort mixed-radix FFT. Each stage combines `radix` transforms
+ * of length `ns` into transforms of length `ns * radix`.
+ */
+function mixedRadix(re, im, inverse, plan) {
+    const n = re.length;
+    const { factors, twRe, twIm, vRe, vIm } = plan;
+    const sign = inverse ? 1 : -1;
+    let xRe = re;
+    let xIm = im;
+    let yRe = plan.workRe;
+    let yIm = plan.workIm;
+    let ns = 1;
+    for (const radix of factors) {
+        const stride = n / radix;
+        const twStep = n / (ns * radix);
+        const nblocks = stride / ns;
+        for (let b = 0; b < nblocks; b++) {
+            const inBase = b * ns;
+            const outBase = b * ns * radix;
+            for (let k = 0; k < ns; k++) {
+                const j = inBase + k;
+                const d = outBase + k;
+                const tw = k * twStep;
+                if (radix === 2) {
+                    const aRe = xRe[j];
+                    const aIm = xIm[j];
+                    let bRe = xRe[j + stride];
+                    let bIm = xIm[j + stride];
+                    if (tw !== 0) {
+                        const wr = twRe[tw];
+                        const wi = -sign * twIm[tw];
+                        const t = bRe * wr - bIm * wi;
+                        bIm = bRe * wi + bIm * wr;
+                        bRe = t;
+                    }
+                    yRe[d] = aRe + bRe;
+                    yIm[d] = aIm + bIm;
+                    yRe[d + ns] = aRe - bRe;
+                    yIm[d + ns] = aIm - bIm;
+                }
+                else if (radix === 4) {
+                    const v0r = xRe[j];
+                    const v0i = xIm[j];
+                    let v1r = xRe[j + stride];
+                    let v1i = xIm[j + stride];
+                    let v2r = xRe[j + 2 * stride];
+                    let v2i = xIm[j + 2 * stride];
+                    let v3r = xRe[j + 3 * stride];
+                    let v3i = xIm[j + 3 * stride];
+                    if (tw !== 0) {
+                        let wr = twRe[tw];
+                        let wi = -sign * twIm[tw];
+                        let t = v1r * wr - v1i * wi;
+                        v1i = v1r * wi + v1i * wr;
+                        v1r = t;
+                        wr = twRe[2 * tw];
+                        wi = -sign * twIm[2 * tw];
+                        t = v2r * wr - v2i * wi;
+                        v2i = v2r * wi + v2i * wr;
+                        v2r = t;
+                        wr = twRe[3 * tw];
+                        wi = -sign * twIm[3 * tw];
+                        t = v3r * wr - v3i * wi;
+                        v3i = v3r * wi + v3i * wr;
+                        v3r = t;
+                    }
+                    const t0r = v0r + v2r;
+                    const t0i = v0i + v2i;
+                    const t1r = v0r - v2r;
+                    const t1i = v0i - v2i;
+                    const t2r = v1r + v3r;
+                    const t2i = v1i + v3i;
+                    // (v1 - v3) * (sign * i)
+                    const dr = v1r - v3r;
+                    const di = v1i - v3i;
+                    const t3r = -sign * di;
+                    const t3i = sign * dr;
+                    yRe[d] = t0r + t2r;
+                    yIm[d] = t0i + t2i;
+                    yRe[d + ns] = t1r + t3r;
+                    yIm[d + ns] = t1i + t3i;
+                    yRe[d + 2 * ns] = t0r - t2r;
+                    yIm[d + 2 * ns] = t0i - t2i;
+                    yRe[d + 3 * ns] = t1r - t3r;
+                    yIm[d + 3 * ns] = t1i - t3i;
+                }
+                else if (radix === 3) {
+                    const v0r = xRe[j];
+                    const v0i = xIm[j];
+                    let v1r = xRe[j + stride];
+                    let v1i = xIm[j + stride];
+                    let v2r = xRe[j + 2 * stride];
+                    let v2i = xIm[j + 2 * stride];
+                    if (tw !== 0) {
+                        let wr = twRe[tw];
+                        let wi = -sign * twIm[tw];
+                        let t = v1r * wr - v1i * wi;
+                        v1i = v1r * wi + v1i * wr;
+                        v1r = t;
+                        wr = twRe[2 * tw];
+                        wi = -sign * twIm[2 * tw];
+                        t = v2r * wr - v2i * wi;
+                        v2i = v2r * wi + v2i * wr;
+                        v2r = t;
+                    }
+                    const sr = v1r + v2r;
+                    const si = v1i + v2i;
+                    const mr = v0r - 0.5 * sr;
+                    const mi = v0i - 0.5 * si;
+                    // i * sign * sin60 * (v1 - v2)
+                    const s = sign * SIN_60;
+                    const qr = -s * (v1i - v2i);
+                    const qi = s * (v1r - v2r);
+                    yRe[d] = v0r + sr;
+                    yIm[d] = v0i + si;
+                    yRe[d + ns] = mr + qr;
+                    yIm[d + ns] = mi + qi;
+                    yRe[d + 2 * ns] = mr - qr;
+                    yIm[d + 2 * ns] = mi - qi;
+                }
+                else if (radix === 5) {
+                    const v0r = xRe[j];
+                    const v0i = xIm[j];
+                    let v1r = xRe[j + stride];
+                    let v1i = xIm[j + stride];
+                    let v2r = xRe[j + 2 * stride];
+                    let v2i = xIm[j + 2 * stride];
+                    let v3r = xRe[j + 3 * stride];
+                    let v3i = xIm[j + 3 * stride];
+                    let v4r = xRe[j + 4 * stride];
+                    let v4i = xIm[j + 4 * stride];
+                    if (tw !== 0) {
+                        let wr = twRe[tw];
+                        let wi = -sign * twIm[tw];
+                        let t = v1r * wr - v1i * wi;
+                        v1i = v1r * wi + v1i * wr;
+                        v1r = t;
+                        wr = twRe[2 * tw];
+                        wi = -sign * twIm[2 * tw];
+                        t = v2r * wr - v2i * wi;
+                        v2i = v2r * wi + v2i * wr;
+                        v2r = t;
+                        wr = twRe[3 * tw];
+                        wi = -sign * twIm[3 * tw];
+                        t = v3r * wr - v3i * wi;
+                        v3i = v3r * wi + v3i * wr;
+                        v3r = t;
+                        wr = twRe[4 * tw];
+                        wi = -sign * twIm[4 * tw];
+                        t = v4r * wr - v4i * wi;
+                        v4i = v4r * wi + v4i * wr;
+                        v4r = t;
+                    }
+                    const a1r = v1r + v4r;
+                    const a1i = v1i + v4i;
+                    const b1r = v1r - v4r;
+                    const b1i = v1i - v4i;
+                    const a2r = v2r + v3r;
+                    const a2i = v2i + v3i;
+                    const b2r = v2r - v3r;
+                    const b2i = v2i - v3i;
+                    const c1r = v0r + COS_72 * a1r + COS_144 * a2r;
+                    const c1i = v0i + COS_72 * a1i + COS_144 * a2i;
+                    const c2r = v0r + COS_144 * a1r + COS_72 * a2r;
+                    const c2i = v0i + COS_144 * a1i + COS_72 * a2i;
+                    // i * sign * (...)
+                    const s1r = SIN_72 * b1r + SIN_144 * b2r;
+                    const s1i = SIN_72 * b1i + SIN_144 * b2i;
+                    const s2r = SIN_144 * b1r - SIN_72 * b2r;
+                    const s2i = SIN_144 * b1i - SIN_72 * b2i;
+                    const q1r = -sign * s1i;
+                    const q1i = sign * s1r;
+                    const q2r = -sign * s2i;
+                    const q2i = sign * s2r;
+                    yRe[d] = v0r + a1r + a2r;
+                    yIm[d] = v0i + a1i + a2i;
+                    yRe[d + ns] = c1r + q1r;
+                    yIm[d + ns] = c1i + q1i;
+                    yRe[d + 2 * ns] = c2r + q2r;
+                    yIm[d + 2 * ns] = c2i + q2i;
+                    yRe[d + 3 * ns] = c2r - q2r;
+                    yIm[d + 3 * ns] = c2i - q2i;
+                    yRe[d + 4 * ns] = c1r - q1r;
+                    yIm[d + 4 * ns] = c1i - q1i;
+                }
+                else {
+                    for (let r = 0; r < radix; r++) {
+                        let vr = xRe[j + r * stride];
+                        let vi = xIm[j + r * stride];
+                        const ti = r * tw;
+                        if (ti !== 0) {
+                            const wr = twRe[ti];
+                            const wi = -sign * twIm[ti];
+                            const t = vr * wr - vi * wi;
+                            vi = vr * wi + vi * wr;
+                            vr = t;
+                        }
+                        vRe[r] = vr;
+                        vIm[r] = vi;
+                    }
+                    const rootStep = n / radix;
+                    for (let q = 0; q < radix; q++) {
+                        let sr = 0;
+                        let si = 0;
+                        for (let r = 0; r < radix; r++) {
+                            const ri = ((q * r) % radix) * rootStep;
+                            const wr = twRe[ri];
+                            const wi = -sign * twIm[ri];
+                            sr += vRe[r] * wr - vIm[r] * wi;
+                            si += vRe[r] * wi + vIm[r] * wr;
+                        }
+                        yRe[d + q * ns] = sr;
+                        yIm[d + q * ns] = si;
+                    }
+                }
+            }
+        }
+        const tRe = xRe;
+        const tIm = xIm;
+        xRe = yRe;
+        xIm = yIm;
+        yRe = tRe;
+        yIm = tIm;
+        ns *= radix;
+    }
+    const scale = inverse ? 1 / n : 1;
+    if (xRe !== re) {
+        for (let i = 0; i < n; i++) {
+            re[i] = xRe[i] * scale;
+            im[i] = xIm[i] * scale;
+        }
+    }
+    else if (inverse) {
         for (let i = 0; i < n; i++) {
             re[i] = re[i] * scale;
             im[i] = im[i] * scale;
@@ -996,7 +1322,32 @@ function unpack28(n28, book) {
     if (i6 < 0 || i6 >= A4.length)
         return { call: "", success: false };
     const call = (A1[i1] + A2[i2] + A3[i3] + A4[i4] + A4[i5] + A4[i6]).trim();
-    return { call, success: call.length > 0 };
+    return { call, success: callok(call) };
+}
+/**
+ * Plausibility check for a standard callsign (callok in packjt77.f90): at least
+ * three characters, not starting with Q, the last digit (call area) in the second
+ * or third position, a prefix containing a letter and an all-letter suffix.
+ */
+function callok(call) {
+    const n = call.length;
+    if (n < 3)
+        return false;
+    if (call[0] === "Q")
+        return false;
+    let i0 = n - 1;
+    while (i0 >= 0 && !isDigit(call[i0]))
+        i0--;
+    if (i0 !== 1 && i0 !== 2)
+        return false;
+    const pfx = call.slice(0, i0);
+    const sfx = call.slice(i0 + 1);
+    if (!/[A-Z]/.test(pfx))
+        return false;
+    return /^[A-Z]*$/.test(sfx);
+}
+function isDigit(c) {
+    return c >= "0" && c <= "9";
 }
 function toGrid4(igrid4) {
     if (igrid4 < 0 || igrid4 > MAXGRID4)
@@ -1405,7 +1756,7 @@ const COSTAS_C$1 = [2, 3, 1, 0];
 const COSTAS_D$1 = [3, 2, 0, 1];
 const NSPS$1 = 576;
 const NFFT1$1 = 4 * NSPS$1; // 2304
-const NH1 = NFFT1$1 / 2; // 1152
+const NH1$1 = NFFT1$1 / 2; // 1152
 const NMAX$1 = 21 * 3456; // 72576
 const NHSYM$1 = Math.floor((NMAX$1 - NFFT1$1) / NSPS$1); // 122
 const NDOWN$1 = 18;
@@ -1439,9 +1790,9 @@ function decode$1(samples, options = {}) {
     const sampleRate = options.sampleRate ?? SAMPLE_RATE;
     const freqLow = options.freqLow ?? 200;
     const freqHigh = options.freqHigh ?? 3000;
-    const syncMin = options.syncMin ?? 1.2;
+    const syncMin = options.syncMin ?? 1.18;
     const depth = options.depth ?? 2;
-    const maxCandidates = options.maxCandidates ?? 100;
+    const maxCandidates = options.maxCandidates ?? 200;
     const book = options.hashCallBook;
     const dd = sampleRate === SAMPLE_RATE
         ? copySamplesToDecodeWindow$1(samples)
@@ -1518,7 +1869,7 @@ function decodeCandidate(candidate, cxRe, cxIm, depth, book, workspace) {
         if (!passesHardSyncQuality(workspace.bitmetrics1))
             continue;
         buildLlrs(workspace);
-        const result = tryDecodePasses$1(workspace, depth);
+        const result = tryDecodePasses(workspace, depth);
         if (!result)
             continue;
         const message77Scrambled = result.message91.slice(0, 77);
@@ -1596,9 +1947,9 @@ function findBestSyncLocation(cdRe, cdIm, segment) {
 function getCandidates4(dd, freqLow, freqHigh, syncMin, maxCandidates) {
     const df = SAMPLE_RATE / NFFT1$1;
     const fac = 1 / 300;
-    const savg = new Float64Array(NH1);
-    const s = new Float64Array(NH1 * NHSYM$1);
-    const savsm = new Float64Array(NH1);
+    const savg = new Float64Array(NH1$1);
+    const s = new Float64Array(NH1$1 * NHSYM$1);
+    const savsm = new Float64Array(NH1$1);
     const xRe = new Float64Array(NFFT1$1);
     const xIm = new Float64Array(NFFT1$1);
     for (let j = 0; j < NHSYM$1; j++) {
@@ -1610,7 +1961,7 @@ function getCandidates4(dd, freqLow, freqHigh, syncMin, maxCandidates) {
         for (let i = 0; i < NFFT1$1; i++)
             xRe[i] = fac * dd[ia + i] * NUTTALL_WINDOW[i];
         fftComplex(xRe, xIm, false);
-        for (let bin = 1; bin <= NH1; bin++) {
+        for (let bin = 1; bin <= NH1$1; bin++) {
             const idx = bin - 1;
             const re = xRe[bin] ?? 0;
             const im = xIm[bin] ?? 0;
@@ -1619,9 +1970,9 @@ function getCandidates4(dd, freqLow, freqHigh, syncMin, maxCandidates) {
             savg[idx] = (savg[idx] ?? 0) + power;
         }
     }
-    for (let i = 0; i < NH1; i++)
+    for (let i = 0; i < NH1$1; i++)
         savg[i] = (savg[i] ?? 0) / NHSYM$1;
-    for (let i = 7; i < NH1 - 7; i++) {
+    for (let i = 7; i < NH1$1 - 7; i++) {
         let sum = 0;
         for (let j = i - 7; j <= i + 7; j++)
             sum += savg[j];
@@ -1677,13 +2028,13 @@ function makeNuttallWindow(n) {
     return out;
 }
 function ft4Baseline(savg, nfa, nfb, df) {
-    const sbase = new Float64Array(NH1);
+    const sbase = new Float64Array(NH1$1);
     sbase.fill(1);
     const ia = Math.max(Math.round(200 / df), nfa);
-    const ib = Math.min(NH1, nfb);
+    const ib = Math.min(NH1$1, nfb);
     if (ib <= ia)
         return sbase;
-    const sDb = new Float64Array(NH1);
+    const sDb = new Float64Array(NH1$1);
     for (let i = ia; i <= ib; i++)
         sDb[i - 1] = 10 * Math.log10(Math.max(1e-30, savg[i - 1]));
     const nseg = 10;
@@ -2137,7 +2488,7 @@ function buildLlrs(workspace) {
         llrc[116 + i] = bitmetrics3[140 + i];
     }
 }
-function tryDecodePasses$1(workspace, depth) {
+function tryDecodePasses(workspace, depth) {
     const maxosd = depth >= 3 ? 2 : depth >= 2 ? 0 : -1;
     const scalefac = 2.83;
     const sources = [workspace.llra, workspace.llrb, workspace.llrc];
@@ -3089,7 +3440,7 @@ function assertPositiveFinite(value, name) {
     }
 }
 // Abramowitz and Stegun 7.1.26 approximation.
-function erfApprox(x) {
+function erfApprox$1(x) {
     const sign = x < 0 ? -1 : 1;
     const ax = Math.abs(x);
     const t = 1 / (1 + 0.3275911 * ax);
@@ -3102,7 +3453,7 @@ function erfApprox(x) {
 function gfskPulse(bt, tt) {
     // Same expression used by lib/ft2/gfsk_pulse.f90.
     const scale = Math.PI * Math.sqrt(2 / Math.log(2)) * bt;
-    return 0.5 * (erfApprox(scale * (tt + 0.5)) - erfApprox(scale * (tt - 0.5)));
+    return 0.5 * (erfApprox$1(scale * (tt + 0.5)) - erfApprox$1(scale * (tt - 0.5)));
 }
 function generateGfskWaveform(tones, options, defaults, shape) {
     const nsym = tones.length;
@@ -3333,38 +3684,83 @@ function encode(msg, options = {}) {
     return generateFT4Waveform(encodeMessage(msg), options);
 }
 
+// Port of the WSJT-X v3.0.1 FT8 decoder (ft8_decode.f90, sync8.f90, ft8b.f90,
+// subtractft8.f90, get_spectrum_baseline.f90).
 const NSPS = 1920;
 const NFFT1 = 2 * NSPS; // 3840
+const NH1 = NFFT1 / 2; // 1920
 const NSTEP = NSPS / 4; // 480
 const NMAX = 15 * 12_000; // 180000
 const NHSYM = Math.floor(NMAX / NSTEP) - 3; // 372
 const NDOWN = 60;
 const NN = 79;
+const NP2 = 2812;
+const NFRAME = NSPS * NN; // 151680
 const NFFT1_LONG = 192000;
 const NFFT2 = 3200;
-const NP2 = 2812;
 const COSTAS_BLOCKS = 7;
 const COSTAS_SYMBOL_LEN = 32;
 const SYNC_TIME_SHIFTS = [0, 36, 72];
 const TAPER_SIZE = 101;
 const TAPER_LAST = TAPER_SIZE - 1;
 const TWO_PI = 2 * Math.PI;
-const MAX_DECODE_PASSES_DEPTH3 = 2;
-const MAX_DECODE_PASSES_DEPTH4 = 3;
-const SUBTRACTION_GAIN = 0.95;
-const SUBTRACTION_PHASE_SHIFT = Math.PI / 2;
-const MIN_SUBTRACTION_SNR = -22;
-const CQ_AP_BITS = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0,
-];
-const FS2 = SAMPLE_RATE / NDOWN;
+const SYNC_DF = SAMPLE_RATE / NFFT1; // 3.125 Hz
+const SYNC_TSTEP = NSTEP / SAMPLE_RATE; // 0.04 s
+const SYNC_JZ = 62;
+const SYNC_MLAG = 13;
+const SYNC_NSSY = NSPS / NSTEP; // 4
+const SYNC_NFOS = NFFT1 / NSPS; // 2
+const SYNC_JSTRT = Math.trunc(0.5 / SYNC_TSTEP); // 12
+const MAX_PRECANDIDATES = 1000;
+const FS2 = SAMPLE_RATE / NDOWN; // 200 Hz
 const DT2 = 1.0 / FS2;
 const DOWNSAMPLE_DF = SAMPLE_RATE / NFFT1_LONG;
 const DOWNSAMPLE_BAUD = SAMPLE_RATE / NSPS;
 const DOWNSAMPLE_SCALE = Math.sqrt(NFFT2 / NFFT1_LONG);
+/** Extent of an FT8 signal around its base frequency (8 tones plus GFSK skirts). */
+const SIGNAL_BAND_BELOW = DOWNSAMPLE_BAUD;
+const SIGNAL_BAND_ABOVE = 8 * DOWNSAMPLE_BAUD;
+/** ft8b time/frequency search grid: ±10 downsampled samples, ±2.5 Hz in 0.5 Hz steps. */
+const SEARCH_TIME_HALF = 10;
+const SEARCH_TIME_STEPS = 2 * SEARCH_TIME_HALF + 1;
+const SEARCH_FREQ_HALF = 5;
+const SEARCH_FREQ_STEP = 0.5;
+const SEARCH_FREQ_STEPS = 2 * SEARCH_FREQ_HALF + 1;
+const LLR_SCALE = 2.83;
+const MAX_HARD_ERRORS = 36;
+const MIN_SNR = -25;
+const SUBTRACT_NFILT = 4000;
+const SUBTRACT_HALF = SUBTRACT_NFILT / 2;
+const SUBTRACT_BLOCK = 20;
+const SUBTRACT_NBLOCKS = NFRAME / SUBTRACT_BLOCK; // 7584
+/** CQ, CQ TEST, CQ FD, CQ RU and CQ WW in the first 29 bits (ft8b.f90 `mcq`, `mcqtest`, ...). */
+const MCQ = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0];
+const MCQTEST = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1, 0,
+];
+const MCQFD = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0,
+];
+const MCQRU = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0,
+];
+const MCQWW = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0,
+];
+const CQ_AP_BITS = {
+    NA_VHF: MCQTEST,
+    EU_VHF: MCQTEST,
+    FIELD_DAY: MCQFD,
+    RTTY: MCQRU,
+    WW_DIGI: MCQWW,
+    ARRL_DIGI: MCQTEST,
+};
 const TAPER = buildTaper(TAPER_SIZE);
 const COSTAS_SYNC = buildCostasSyncTemplates();
-const FREQ_SHIFT_SYNC = buildFrequencyShiftSyncTemplates();
+const { rotRe: SLIDE_ROT_RE, rotIm: SLIDE_ROT_IM, endRe: SLIDE_END_RE, endIm: SLIDE_END_IM, phaseRe: SLIDE_PHASE_RE, phaseIm: SLIDE_PHASE_IM, } = buildSlidingDftTables();
+const BASELINE_WINDOW = buildBaselineWindow();
+const GFSK_PULSE = buildGfskPulse(2.0);
+const LPF = buildSubtractionFilter();
 /**
  * Decode all FT8 signals in an audio buffer.
  * Input: mono audio samples at `sampleRate` Hz, duration ~15s.
@@ -3373,34 +3769,44 @@ function decode(samples, options = {}) {
     const sampleRate = options.sampleRate ?? SAMPLE_RATE;
     const nfa = options.freqLow ?? 200;
     const nfb = options.freqHigh ?? 3000;
-    const syncmin = options.syncMin ?? 1.2;
-    const depth = options.depth ?? 2;
-    const maxCandidates = options.maxCandidates ?? 300;
+    // Depths above 3 are accepted and behave like 3.
+    const depth = Math.min(options.depth ?? 2, 3);
+    const syncmin = options.syncMin ?? (depth <= 2 ? 2.1 : 1.3);
+    const maxCandidates = options.maxCandidates ?? 1000;
     const book = options.hashCallBook;
+    const contest = options.contest;
     const dd = sampleRate === SAMPLE_RATE
         ? copySamplesToDecodeWindow(samples)
         : resample(samples, sampleRate, SAMPLE_RATE, NMAX);
-    const residual = new Float64Array(dd);
-    const cxRe = new Float64Array(NFFT1_LONG);
-    const cxIm = new Float64Array(NFFT1_LONG);
     const workspace = createDecodeWorkspace();
-    const toneCache = new Map();
     const decoded = [];
     const seenMessages = new Set();
-    const maxPasses = depth >= 4 ? MAX_DECODE_PASSES_DEPTH4 : depth >= 3 ? MAX_DECODE_PASSES_DEPTH3 : 1;
-    for (let pass = 0; pass < maxPasses; pass++) {
-        cxRe.fill(0);
-        cxIm.fill(0);
-        cxRe.set(residual);
-        fftComplex(cxRe, cxIm, false);
-        const { candidates, sbase } = sync8(residual, nfa, nfb, syncmin, maxCandidates);
-        const coarseFrequencyUses = countCandidateFrequencies(candidates);
-        const coarseDownsampleCache = new Map();
-        let decodedInPass = 0;
+    const npass = depth <= 1 ? 2 : 3;
+    for (let ipass = 1; ipass <= npass; ipass++) {
+        // Pass 1 uses amplitude bit metrics, later passes power metrics.
+        const imetric = ipass === 1 ? 1 : 2;
+        if (ipass === 3 && decoded.length === 0)
+            break;
+        const { candidates, sbase } = sync8(dd, nfa, nfb, syncmin, maxCandidates);
+        computeLongSpectrum(dd, workspace);
+        // Bands [lo, hi] (Hz) of signals subtracted since the spectrum was computed.
+        const staleBands = [];
         for (const cand of candidates) {
-            const result = ft8b(residual, cxRe, cxIm, cand.freq, cand.dt, sbase, depth, book, workspace, coarseDownsampleCache, coarseFrequencyUses);
+            // WSJT-X keeps using the spectrum computed at the start of the pass. A
+            // candidate overlapping a just-subtracted signal would then re-decode
+            // that signal (and subtract it a second time with worse parameters),
+            // so refresh the spectrum first.
+            if (overlapsBands(cand.freq, staleBands)) {
+                computeLongSpectrum(dd, workspace);
+                staleBands.length = 0;
+            }
+            const ibin = Math.max(1, Math.round(cand.freq / SYNC_DF));
+            const xbase = 10.0 ** (0.1 * (sbase[ibin] - 40.0));
+            const result = ft8b(cand.freq, cand.dt, xbase, depth, imetric, contest, book, workspace);
             if (!result)
                 continue;
+            subtractft8(dd, result.tones, result.freq, result.dtSubtract, workspace);
+            staleBands.push(result.freq - SIGNAL_BAND_BELOW, result.freq + SIGNAL_BAND_ABOVE);
             const messageKey = normalizeMessageKey(result.msg);
             if (seenMessages.has(messageKey))
                 continue;
@@ -3412,28 +3818,28 @@ function decode(samples, options = {}) {
                 msg: result.msg,
                 sync: cand.sync,
             });
-            decodedInPass++;
-            if (pass + 1 < maxPasses) {
-                subtractDecodedSignal(residual, result, toneCache);
-            }
         }
-        if (decodedInPass === 0)
-            break;
     }
     return decoded;
 }
 function normalizeMessageKey(msg) {
     return msg.trim().replace(/\s+/g, " ").toUpperCase();
 }
-function countCandidateFrequencies(candidates) {
-    const counts = new Map();
-    for (const c of candidates) {
-        counts.set(c.freq, (counts.get(c.freq) ?? 0) + 1);
+/** Whether the band ft8b would use for a candidate at `freq` overlaps any of `bands`. */
+function overlapsBands(freq, bands) {
+    const search = SEARCH_FREQ_HALF * SEARCH_FREQ_STEP;
+    const lo = freq - search - 1.5 * DOWNSAMPLE_BAUD;
+    const hi = freq + search + 8.5 * DOWNSAMPLE_BAUD;
+    for (let i = 0; i < bands.length; i += 2) {
+        if (lo < bands[i + 1] && hi > bands[i])
+            return true;
     }
-    return counts;
+    return false;
 }
 function createDecodeWorkspace() {
     return {
+        cxRe: new Float64Array(NFFT1_LONG),
+        cxIm: new Float64Array(NFFT1_LONG),
         cd0Re: new Float64Array(NFFT2),
         cd0Im: new Float64Array(NFFT2),
         shiftRe: new Float64Array(NFFT2),
@@ -3448,11 +3854,22 @@ function createDecodeWorkspace() {
         bmetb: new Float64Array(N_LDPC),
         bmetc: new Float64Array(N_LDPC),
         bmetd: new Float64Array(N_LDPC),
+        bmete: new Float64Array(N_LDPC),
         llr: new Float64Array(N_LDPC),
         apmask: new Int8Array(N_LDPC),
         ss: new Float64Array(9),
-        fallbackRe: new Float64Array(NFFT2),
-        fallbackIm: new Float64Array(NFFT2),
+        syncGrid: new Float64Array(SEARCH_TIME_STEPS * SEARCH_FREQ_STEPS),
+        crefRe: new Float64Array(NFRAME),
+        crefIm: new Float64Array(NFRAME),
+        sum0Re: new Float64Array(SUBTRACT_NBLOCKS + 1),
+        sum0Im: new Float64Array(SUBTRACT_NBLOCKS + 1),
+        sumPlusRe: new Float64Array(SUBTRACT_NBLOCKS + 1),
+        sumPlusIm: new Float64Array(SUBTRACT_NBLOCKS + 1),
+        sumMinusRe: new Float64Array(SUBTRACT_NBLOCKS + 1),
+        sumMinusIm: new Float64Array(SUBTRACT_NBLOCKS + 1),
+        cfiltRe: new Float64Array(SUBTRACT_NBLOCKS + 1),
+        cfiltIm: new Float64Array(SUBTRACT_NBLOCKS + 1),
+        dphi: new Float64Array((NN + 2) * NSPS),
     };
 }
 function copySamplesToDecodeWindow(samples) {
@@ -3462,40 +3879,75 @@ function copySamplesToDecodeWindow(samples) {
         out[i] = samples[i];
     return out;
 }
-function sync8(dd, nfa, nfb, syncmin, maxcand) {
-    const JZ = 62;
-    const fftSize = nextPow2(NFFT1); // 4096
-    const halfSize = fftSize / 2;
-    const tstep = NSTEP / SAMPLE_RATE;
-    const df = SAMPLE_RATE / fftSize;
-    const fac = 1.0 / 300.0;
-    const s = new Float64Array(halfSize * NHSYM);
-    const savg = new Float64Array(halfSize);
-    const xRe = new Float64Array(fftSize);
-    const xIm = new Float64Array(fftSize);
-    for (let j = 0; j < NHSYM; j++) {
-        const ia = j * NSTEP;
-        xRe.fill(0);
-        xIm.fill(0);
-        for (let i = 0; i < NSPS && ia + i < dd.length; i++)
-            xRe[i] = fac * dd[ia + i];
-        fftComplex(xRe, xIm, false);
-        for (let i = 0; i < halfSize; i++) {
-            const power = xRe[i] * xRe[i] + xIm[i] * xIm[i];
-            s[i * NHSYM + j] = power;
-            savg[i] = savg[i] + power;
+function computeLongSpectrum(dd, workspace) {
+    const { cxRe, cxIm } = workspace;
+    cxRe.fill(0);
+    cxIm.fill(0);
+    cxRe.set(dd);
+    fftComplex(cxRe, cxIm, false);
+}
+// ── Candidate search (sync8.f90) ────────────────────────────────────────────
+/**
+ * Power spectra of 3840-sample FFTs of `x * scale`, stepping `step` samples.
+ * Two real frames are transformed per complex FFT.
+ * Returns s[bin * nframes + frame] for bins 0..NH1.
+ */
+function frameSpectra(dd, nframes, step, frameLen, window, scale) {
+    const s = new Float64Array((NH1 + 1) * nframes);
+    const re = new Float64Array(NFFT1);
+    const im = new Float64Array(NFFT1);
+    for (let j = 0; j < nframes; j += 2) {
+        re.fill(0);
+        im.fill(0);
+        const ia = j * step;
+        const ib = (j + 1) * step;
+        const hasSecond = j + 1 < nframes;
+        for (let i = 0; i < frameLen; i++) {
+            const w = window ? window[i] : scale;
+            if (ia + i < dd.length)
+                re[i] = w * dd[ia + i];
+            if (hasSecond && ib + i < dd.length)
+                im[i] = w * dd[ib + i];
+        }
+        fftComplex(re, im, false);
+        for (let k = 1; k <= NH1; k++) {
+            const nk = (NFFT1 - k) % NFFT1;
+            // X = A + iB with A, B real-input spectra.
+            const aRe = 0.5 * (re[k] + re[nk]);
+            const aIm = 0.5 * (im[k] - im[nk]);
+            s[k * nframes + j] = aRe * aRe + aIm * aIm;
+            if (hasSecond) {
+                const bRe = 0.5 * (im[k] + im[nk]);
+                const bIm = -0.5 * (re[k] - re[nk]);
+                s[k * nframes + j + 1] = bRe * bRe + bIm * bIm;
+            }
         }
     }
-    const sbase = computeBaseline(savg, nfa, nfb, df, halfSize);
-    const ia = Math.max(1, Math.round(nfa / df));
-    const ib = Math.min(halfSize - 14, Math.round(nfb / df));
-    const nssy = Math.floor(NSPS / NSTEP);
-    const nfos = Math.round(SAMPLE_RATE / NSPS / df);
-    const jstrt = Math.round(0.5 / tstep);
-    const width = 2 * JZ + 1;
-    const sync2d = new Float64Array((ib - ia + 1) * width);
+    return s;
+}
+function sync8(dd, nfa, nfb, syncmin, maxcand) {
+    const s = frameSpectra(dd, NHSYM, NSTEP, NSPS, null, 1.0 / 300.0);
+    const sbase = getSpectrumBaseline(dd, nfa, nfb);
+    const ia = Math.max(1, Math.round(nfa / SYNC_DF));
+    const ib = Math.min(NH1 - SYNC_NFOS * 7, Math.round(nfb / SYNC_DF));
+    if (ib < ia)
+        return { candidates: [], sbase };
+    const iz = ib - ia + 1;
+    const width = 2 * SYNC_JZ + 1;
+    // Sum over the 7 tone bins of each Costas symbol, per frequency and time.
+    const t0s = new Float64Array(iz * NHSYM);
     for (let i = ia; i <= ib; i++) {
-        for (let jj = -JZ; jj <= JZ; jj++) {
+        const row = (i - ia) * NHSYM;
+        for (let tone = 0; tone <= 6; tone++) {
+            const src = (i + SYNC_NFOS * tone) * NHSYM;
+            for (let m = 0; m < NHSYM; m++)
+                t0s[row + m] = t0s[row + m] + s[src + m];
+        }
+    }
+    const sync2d = new Float64Array(iz * width);
+    for (let i = ia; i <= ib; i++) {
+        const row = (i - ia) * NHSYM;
+        for (let j = -SYNC_JZ; j <= SYNC_JZ; j++) {
             let ta = 0;
             let tb = 0;
             let tc = 0;
@@ -3503,253 +3955,350 @@ function sync8(dd, nfa, nfb, syncmin, maxcand) {
             let t0b = 0;
             let t0c = 0;
             for (let n = 0; n < COSTAS_BLOCKS; n++) {
-                const m = jj + jstrt + nssy * n;
-                const iCostas = i + nfos * COSTAS[n];
-                if (m >= 0 && m < NHSYM && iCostas < halfSize) {
-                    ta += s[iCostas * NHSYM + m];
-                    for (let tone = 0; tone <= 6; tone++) {
-                        const idx = i + nfos * tone;
-                        if (idx < halfSize)
-                            t0a += s[idx * NHSYM + m];
-                    }
+                // 0-based time index of Costas symbol n (Fortran m-1)
+                const m = j + SYNC_JSTRT + SYNC_NSSY * n - 1;
+                const sc = (i + SYNC_NFOS * COSTAS[n]) * NHSYM;
+                if (m >= 0 && m < NHSYM) {
+                    ta += s[sc + m];
+                    t0a += t0s[row + m];
                 }
-                const m36 = m + nssy * 36;
-                if (m36 >= 0 && m36 < NHSYM && iCostas < halfSize) {
-                    tb += s[iCostas * NHSYM + m36];
-                    for (let tone = 0; tone <= 6; tone++) {
-                        const idx = i + nfos * tone;
-                        if (idx < halfSize)
-                            t0b += s[idx * NHSYM + m36];
-                    }
+                const mb = m + SYNC_NSSY * 36;
+                if (mb >= 0 && mb < NHSYM) {
+                    tb += s[sc + mb];
+                    t0b += t0s[row + mb];
                 }
-                const m72 = m + nssy * 72;
-                if (m72 >= 0 && m72 < NHSYM && iCostas < halfSize) {
-                    tc += s[iCostas * NHSYM + m72];
-                    for (let tone = 0; tone <= 6; tone++) {
-                        const idx = i + nfos * tone;
-                        if (idx < halfSize)
-                            t0c += s[idx * NHSYM + m72];
-                    }
+                const mc = m + SYNC_NSSY * 72;
+                if (mc >= 0 && mc < NHSYM) {
+                    tc += s[sc + mc];
+                    t0c += t0s[row + mc];
                 }
             }
-            const t = ta + tb + tc;
-            const t0 = (t0a + t0b + t0c - t) / 6.0;
-            const syncVal = t0 > 0 ? t / t0 : 0;
-            const tbc = tb + tc;
-            const t0bc = (t0b + t0c - tbc) / 6.0;
-            const syncBc = t0bc > 0 ? tbc / t0bc : 0;
-            sync2d[(i - ia) * width + (jj + JZ)] = Math.max(syncVal, syncBc);
+            let t = ta + tb + tc;
+            let t0 = (t0a + t0b + t0c - t) / 6.0;
+            const syncAbc = t0 > 0 ? t / t0 : 0;
+            t = tb + tc;
+            t0 = (t0b + t0c - t) / 6.0;
+            const syncBc = t0 > 0 ? t / t0 : 0;
+            sync2d[(i - ia) * width + j + SYNC_JZ] = Math.max(syncAbc, syncBc);
         }
+    }
+    const red = new Float64Array(iz);
+    const red2 = new Float64Array(iz);
+    const jpeak = new Int32Array(iz);
+    const jpeak2 = new Int32Array(iz);
+    for (let k = 0; k < iz; k++) {
+        const row = k * width + SYNC_JZ;
+        let best = -Infinity;
+        for (let j = -SYNC_MLAG; j <= SYNC_MLAG; j++) {
+            const v = sync2d[row + j];
+            if (v > best) {
+                best = v;
+                jpeak[k] = j;
+            }
+        }
+        red[k] = best;
+        best = -Infinity;
+        for (let j = -SYNC_JZ; j <= SYNC_JZ; j++) {
+            const v = sync2d[row + j];
+            if (v > best) {
+                best = v;
+                jpeak2[k] = j;
+            }
+        }
+        red2[k] = best;
+    }
+    const npctile = Math.round(0.4 * iz);
+    if (npctile < 1)
+        return { candidates: [], sbase };
+    const order = Array.from({ length: iz }, (_, k) => k).sort((a, b) => red[a] - red[b]);
+    const base = red[order[npctile - 1]];
+    const order2 = Array.from({ length: iz }, (_, k) => k).sort((a, b) => red2[a] - red2[b]);
+    const base2 = red2[order2[npctile - 1]];
+    for (let k = 0; k < iz; k++) {
+        red[k] = red[k] / base;
+        red2[k] = red2[k] / base2;
     }
     const candidates0 = [];
-    const mlag = 10;
-    for (let i = ia; i <= ib; i++) {
-        let bestSync = -1;
-        let bestJ = 0;
-        for (let j = -mlag; j <= mlag; j++) {
-            const v = sync2d[(i - ia) * width + (j + JZ)];
-            if (v > bestSync) {
-                bestSync = v;
-                bestJ = j;
-            }
+    for (let i = 0; i < Math.min(MAX_PRECANDIDATES, iz); i++) {
+        const k = order[iz - 1 - i];
+        const freq = (ia + k) * SYNC_DF;
+        if (candidates0.length >= MAX_PRECANDIDATES)
+            break;
+        if (red[k] >= syncmin) {
+            candidates0.push({ freq, dt: (jpeak[k] - 0.5) * SYNC_TSTEP, sync: red[k] });
         }
-        let bestSync2 = -1;
-        let bestJ2 = 0;
-        for (let j = -JZ; j <= JZ; j++) {
-            const v = sync2d[(i - ia) * width + (j + JZ)];
-            if (v > bestSync2) {
-                bestSync2 = v;
-                bestJ2 = j;
-            }
-        }
-        if (bestSync >= syncmin) {
-            candidates0.push({
-                freq: i * df,
-                dt: (bestJ - 0.5) * tstep,
-                sync: bestSync,
-            });
-        }
-        if (bestJ2 !== bestJ && bestSync2 >= syncmin) {
-            candidates0.push({
-                freq: i * df,
-                dt: (bestJ2 - 0.5) * tstep,
-                sync: bestSync2,
-            });
+        if (jpeak2[k] === jpeak[k])
+            continue;
+        if (candidates0.length >= MAX_PRECANDIDATES)
+            break;
+        if (red2[k] >= syncmin) {
+            candidates0.push({ freq, dt: (jpeak2[k] - 0.5) * SYNC_TSTEP, sync: red2[k] });
         }
     }
-    const syncValues = candidates0.map((c) => c.sync);
-    syncValues.sort((a, b) => a - b);
-    const pctileIdx = Math.max(0, Math.round(0.4 * syncValues.length) - 1);
-    const base = syncValues[pctileIdx] ?? 1;
-    if (base > 0) {
-        for (const c of candidates0)
-            c.sync /= base;
-    }
-    for (let i = 0; i < candidates0.length; i++) {
+    // Save only the best of near-dupe freqs.
+    for (let i = 1; i < candidates0.length; i++) {
+        const ci = candidates0[i];
         for (let j = 0; j < i; j++) {
-            const fdiff = Math.abs(candidates0[i].freq - candidates0[j].freq);
-            const tdiff = Math.abs(candidates0[i].dt - candidates0[j].dt);
-            if (fdiff < 4.0 && tdiff < 0.04) {
-                if (candidates0[i].sync >= candidates0[j].sync) {
-                    candidates0[j].sync = 0;
-                }
-                else {
-                    candidates0[i].sync = 0;
-                }
+            const cj = candidates0[j];
+            if (Math.abs(ci.freq - cj.freq) < 4.0 && Math.abs(ci.dt - cj.dt) < 0.04) {
+                if (ci.sync >= cj.sync)
+                    cj.sync = 0;
+                if (ci.sync < cj.sync)
+                    ci.sync = 0;
             }
         }
     }
-    const filtered = candidates0.filter((c) => c.sync >= syncmin);
-    filtered.sort((a, b) => b.sync - a.sync);
-    return { candidates: filtered.slice(0, maxcand), sbase };
+    const candidates = candidates0.filter((c) => c.sync >= syncmin);
+    candidates.sort((a, b) => b.sync - a.sync);
+    return { candidates: candidates.slice(0, maxcand), sbase };
 }
-function computeBaseline(savg, nfa, nfb, df, nh1) {
-    const sbase = new Float64Array(nh1);
-    const ia = Math.max(1, Math.round(nfa / df));
-    const ib = Math.min(nh1 - 1, Math.round(nfb / df));
-    const window = 50;
-    for (let i = 0; i < nh1; i++) {
+/** get_spectrum_baseline.f90 + baseline.f90: spectrum baseline in dB, indexed by bin (3.125 Hz). */
+function getSpectrumBaseline(dd, nfaIn, nfbIn) {
+    const nst = NFFT1 / 2;
+    let nframes = 0;
+    while (nframes < 93 && nframes * nst + NFFT1 <= NMAX)
+        nframes++;
+    const s = frameSpectra(dd, nframes, nst, NFFT1, BASELINE_WINDOW, 1);
+    const savg = new Float64Array(NH1 + 1);
+    for (let k = 1; k <= NH1; k++) {
         let sum = 0;
-        let count = 0;
-        const lo = Math.max(ia, i - window);
-        const hi = Math.min(ib, i + window);
-        for (let j = lo; j <= hi; j++) {
-            sum += savg[j];
-            count++;
+        for (let j = 0; j < nframes; j++)
+            sum += s[k * nframes + j];
+        savg[k] = sum;
+    }
+    let nfa = nfaIn;
+    let nfb = nfbIn;
+    const nwin = nfb - nfa;
+    if (nfa < 100) {
+        nfa = 100;
+        if (nwin < 100)
+            nfb = nfa + nwin;
+    }
+    if (nfb > 4910) {
+        nfb = 4910;
+        if (nwin < 100)
+            nfa = nfb - nwin;
+    }
+    return baseline(savg, nfa, nfb);
+}
+function baseline(savg, nfa, nfb) {
+    const sbase = new Float64Array(NH1 + 1);
+    const nseg = 10;
+    const npct = 10;
+    const ia = Math.max(1, Math.round(nfa / SYNC_DF));
+    const ib = Math.min(NH1, Math.round(nfb / SYNC_DF));
+    if (ib <= ia)
+        return sbase;
+    const sdb = new Float64Array(NH1 + 1);
+    for (let i = ia; i <= ib; i++)
+        sdb[i] = 10.0 * Math.log10(Math.max(savg[i], 1e-30));
+    const nlen = Math.trunc((ib - ia + 1) / nseg);
+    const i0 = Math.trunc((ib - ia + 1) / 2);
+    const xs = [];
+    const ys = [];
+    for (let n = 0; n < nseg; n++) {
+        const ja = ia + n * nlen;
+        const jb = ja + nlen - 1;
+        const seg = Array.from(sdb.subarray(ja, jb + 1)).sort((a, b) => a - b);
+        let jp = Math.round(nlen * 0.01 * npct);
+        if (jp < 1)
+            jp = 1;
+        if (jp > nlen)
+            jp = nlen;
+        const base = seg[jp - 1];
+        for (let i = ja; i <= jb; i++) {
+            if (sdb[i] <= base && xs.length < 1000) {
+                xs.push(i - i0);
+                ys.push(sdb[i]);
+            }
         }
-        sbase[i] = count > 0 ? 10 * Math.log10(Math.max(1e-30, sum / count)) : 0;
+    }
+    const a = polyfit(xs, ys, 5);
+    for (let i = ia; i <= ib; i++) {
+        const t = i - i0;
+        sbase[i] = a[0] + t * (a[1] + t * (a[2] + t * (a[3] + t * a[4]))) + 0.65;
     }
     return sbase;
 }
-function ft8b(_dd0, cxRe, cxIm, f1, xdt, _sbase, depth, book, workspace, coarseDownsampleCache, coarseFrequencyUses) {
-    loadCoarseDownsample(cxRe, cxIm, f1, workspace, coarseDownsampleCache, coarseFrequencyUses);
-    const ibest = findBestTimeOffset(workspace.cd0Re, workspace.cd0Im, xdt);
-    const delfbest = findBestFrequencyShift(workspace.cd0Re, workspace.cd0Im, ibest);
-    workspace.fallbackRe.set(workspace.cd0Re);
-    workspace.fallbackIm.set(workspace.cd0Im);
-    f1 += delfbest;
-    ft8Downsample(cxRe, cxIm, f1, workspace);
-    let result = tryDecodeAtCurrentOffset(f1, ibest, depth, book, workspace);
-    if (result)
-        return result;
-    if (depth < 4)
+/** Least-squares polynomial fit y ≈ Σ a[n] x^n (n < nterms). */
+function polyfit(xs, ys, nterms) {
+    const a = new Array(nterms).fill(0);
+    if (xs.length < nterms)
+        return a;
+    // Fit in a scaled variable for numerical stability, then rescale.
+    let scale = 1;
+    for (const x of xs)
+        scale = Math.max(scale, Math.abs(x));
+    const mat = Array.from({ length: nterms }, () => new Array(nterms + 1).fill(0));
+    for (let p = 0; p < xs.length; p++) {
+        const u = xs[p] / scale;
+        const pw = new Array(2 * nterms - 1);
+        pw[0] = 1;
+        for (let n = 1; n < pw.length; n++)
+            pw[n] = pw[n - 1] * u;
+        for (let r = 0; r < nterms; r++) {
+            for (let c = 0; c < nterms; c++)
+                mat[r][c] = mat[r][c] + pw[r + c];
+            mat[r][nterms] = mat[r][nterms] + pw[r] * ys[p];
+        }
+    }
+    for (let col = 0; col < nterms; col++) {
+        let piv = col;
+        for (let r = col + 1; r < nterms; r++) {
+            if (Math.abs(mat[r][col]) > Math.abs(mat[piv][col]))
+                piv = r;
+        }
+        if (Math.abs(mat[piv][col]) < 1e-300)
+            return a;
+        [mat[col], mat[piv]] = [mat[piv], mat[col]];
+        for (let r = 0; r < nterms; r++) {
+            if (r === col)
+                continue;
+            const f = mat[r][col] / mat[col][col];
+            if (f === 0)
+                continue;
+            for (let c = col; c <= nterms; c++)
+                mat[r][c] = mat[r][c] - f * mat[col][c];
+        }
+    }
+    let sp = 1;
+    for (let n = 0; n < nterms; n++) {
+        a[n] = mat[n][nterms] / mat[n][n] / sp;
+        sp *= scale;
+    }
+    return a;
+}
+// ── Per-candidate decoding (ft8b.f90) ───────────────────────────────────────
+function ft8b(f1In, xdtIn, xbase, ndepth, imetric, contest, book, workspace) {
+    const { cd0Re, cd0Im, ss, s8 } = workspace;
+    let f1 = f1In;
+    ft8Downsample(f1, workspace);
+    // WSJT-X searches time at the candidate frequency and then frequency at
+    // that time. The candidate frequency can be off by up to half a 3.125 Hz
+    // bin, which biases the time search, so search time and frequency jointly.
+    const i0 = Math.round((xdtIn + 0.5) * FS2);
+    const search = searchTimeFrequency(cd0Re, cd0Im, i0, workspace.syncGrid);
+    let ibest = search.ibest;
+    f1 += search.delf;
+    ft8Downsample(f1, workspace);
+    for (let idt = -4; idt <= 4; idt++) {
+        ss[idt + 4] = sync8d(cd0Re, cd0Im, ibest + idt, COSTAS_SYNC.re, COSTAS_SYNC.im);
+    }
+    let iloc = 0;
+    for (let i = 1; i < 9; i++)
+        if (ss[i] > ss[iloc])
+            iloc = i;
+    ibest += iloc - 4;
+    const xdt = (ibest - 1) * DT2;
+    // Sub-sample time estimate for signal subtraction
+    let dx = 0;
+    if (iloc > 0 && iloc < 8) {
+        const ym = ss[iloc - 1];
+        const y0 = ss[iloc];
+        const yp = ss[iloc + 1];
+        const c = yp + ym - 2 * y0;
+        if (c < 0)
+            dx = Math.max(-0.5, Math.min(0.5, (-(yp - ym) / 2 / c) * 1));
+    }
+    const dtSubtract = (ibest + dx - 0.5) * DT2;
+    extractSoftSymbols(ibest, workspace);
+    // Sync quality check: hard sync sum, max 21
+    let nsync = 0;
+    for (let k = 0; k < COSTAS_BLOCKS; k++) {
+        for (const offset of SYNC_TIME_SHIFTS) {
+            let ip = 0;
+            for (let t = 1; t < 8; t++) {
+                if (s8[t * NN + k + offset] > s8[ip * NN + k + offset])
+                    ip = t;
+            }
+            if (ip === COSTAS[k])
+                nsync++;
+        }
+    }
+    let nsyncMin = imetric === 2 ? 7 : 6;
+    if (ndepth <= 2)
+        nsyncMin = 8;
+    if (nsync <= nsyncMin)
         return null;
-    workspace.cd0Re.set(workspace.fallbackRe);
-    workspace.cd0Im.set(workspace.fallbackIm);
-    shiftDownsampledFrequency(workspace.cd0Re, workspace.cd0Im, -delfbest);
-    result = tryDecodeAtCurrentOffset(f1, ibest, depth, book, workspace);
-    if (result)
-        return result;
+    buildBitMetrics(imetric, workspace);
+    const { bmeta, bmetb, bmetc, bmetd, bmete, llr, apmask } = workspace;
+    const maxosd = ndepth <= 1 ? -1 : 2;
+    // Passes 1-5: regular decoding with each bit metric. Passes 6-7 (depth 3):
+    // a priori decoding of "CQ ??? ???" (iaptype=1) with metrics a and c.
+    const metrics = [bmeta, bmetb, bmetc, bmetd, bmete, bmeta, bmetc];
+    const npasses = ndepth >= 3 ? 7 : 5;
+    const mcq = contest ? CQ_AP_BITS[contest] : MCQ;
+    for (let ipass = 1; ipass <= npasses; ipass++) {
+        const metric = metrics[ipass - 1];
+        for (let i = 0; i < N_LDPC; i++)
+            llr[i] = LLR_SCALE * metric[i];
+        apmask.fill(0);
+        if (ipass > 5) {
+            const apmag = maxAbs(llr) * 1.1;
+            for (let i = 0; i < 29; i++) {
+                apmask[i] = 1;
+                llr[i] = apmag * (2 * mcq[i] - 1);
+            }
+            apmask[74] = 1;
+            apmask[75] = 1;
+            apmask[76] = 1;
+            llr[74] = -apmag;
+            llr[75] = -apmag;
+            llr[76] = apmag;
+        }
+        const result = decode174_91(llr, apmask, maxosd, 2);
+        if (!result)
+            continue;
+        const accepted = acceptCodeword(result, contest, book);
+        if (!accepted)
+            continue;
+        // SNR relative to the spectrum baseline (WSJT-X xsnr2).
+        const tones = getTones(result.cw);
+        let xsig = 0;
+        for (let i = 0; i < NN; i++)
+            xsig += s8[tones[i] * NN + i] ** 2;
+        let xsnr = 0.001;
+        const arg = xsig / xbase / 3.0e6 - 1.0;
+        if (arg > 0.1)
+            xsnr = arg;
+        xsnr = 10.0 * Math.log10(xsnr) - 27.0;
+        // Likely false decode
+        if (nsync <= 10 && xsnr < MIN_SNR)
+            return null;
+        if (xsnr < MIN_SNR)
+            xsnr = MIN_SNR;
+        return { msg: accepted, freq: f1, dt: xdt, dtSubtract, snr: xsnr, tones };
+    }
     return null;
 }
-function tryDecodeAtCurrentOffset(freq, ibest0, depth, book, workspace) {
-    const ibest = refineTimeOffset(workspace.cd0Re, workspace.cd0Im, ibest0, workspace.ss);
-    const xdt = (depth >= 4 ? ibest : ibest - 1) * DT2;
-    extractSoftSymbols(workspace.cd0Re, workspace.cd0Im, ibest, workspace);
-    const minCostasHits = depth >= 3 ? 6 : 7;
-    if (!passesSyncGate(workspace.s8, minCostasHits))
-        return null;
-    buildBitMetrics(workspace);
-    const result = tryDecodePasses(workspace, depth);
-    if (!result)
+function acceptCodeword(result, contest, book) {
+    if (result.nharderrors < 0 || result.nharderrors > MAX_HARD_ERRORS)
         return null;
     if (result.cw.every((b) => b === 0))
         return null;
     const message77 = result.message91.slice(0, 77);
-    if (!isValidMessageType(message77))
+    const n3 = (message77[71] << 2) | (message77[72] << 1) | message77[73];
+    const i3 = (message77[74] << 2) | (message77[75] << 1) | message77[76];
+    if (i3 > 5 || (i3 === 0 && n3 > 6))
+        return null;
+    if (i3 === 0 && n3 === 2)
         return null;
     const { msg, success } = unpack77(message77, book);
     if (!success || msg.trim().length === 0)
         return null;
-    const snr = estimateSnr(workspace.s8, result.cw);
-    return { msg, freq, dt: xdt, snr };
+    // Rover and RTTY Roundup messages are rejected outside a contest.
+    if (!contest && i3 >= 1 && i3 <= 3 && (msg.includes("/R") || msg.startsWith("TU; "))) {
+        return null;
+    }
+    return msg;
 }
-function loadCoarseDownsample(cxRe, cxIm, f0, workspace, coarseDownsampleCache, coarseFrequencyUses) {
-    const cached = coarseDownsampleCache.get(f0);
-    if (cached) {
-        workspace.cd0Re.set(cached.re);
-        workspace.cd0Im.set(cached.im);
-    }
-    else {
-        ft8Downsample(cxRe, cxIm, f0, workspace);
-        const uses = coarseFrequencyUses.get(f0) ?? 0;
-        if (uses > 1) {
-            coarseDownsampleCache.set(f0, {
-                re: new Float64Array(workspace.cd0Re),
-                im: new Float64Array(workspace.cd0Im),
-            });
-        }
-    }
-    const remaining = (coarseFrequencyUses.get(f0) ?? 1) - 1;
-    if (remaining <= 0) {
-        coarseFrequencyUses.delete(f0);
-        coarseDownsampleCache.delete(f0);
-    }
-    else {
-        coarseFrequencyUses.set(f0, remaining);
-    }
-}
-function findBestTimeOffset(cd0Re, cd0Im, xdt) {
-    const i0 = Math.round((xdt + 0.5) * FS2);
-    let smax = 0;
-    let ibest = i0;
-    for (let idt = i0 - 10; idt <= i0 + 10; idt++) {
-        const sync = sync8d(cd0Re, cd0Im, idt, COSTAS_SYNC.re, COSTAS_SYNC.im);
-        if (sync > smax) {
-            smax = sync;
-            ibest = idt;
-        }
-    }
-    return ibest;
-}
-function findBestFrequencyShift(cd0Re, cd0Im, ibest) {
-    let smax = 0;
-    let delfbest = 0;
-    for (const tpl of FREQ_SHIFT_SYNC) {
-        const sync = sync8d(cd0Re, cd0Im, ibest, tpl.re, tpl.im);
-        if (sync > smax) {
-            smax = sync;
-            delfbest = tpl.delf;
-        }
-    }
-    return delfbest;
-}
-function refineTimeOffset(cd0Re, cd0Im, ibest, ss) {
-    for (let idt = -4; idt <= 4; idt++) {
-        ss[idt + 4] = sync8d(cd0Re, cd0Im, ibest + idt, COSTAS_SYNC.re, COSTAS_SYNC.im);
-    }
-    let maxss = -1;
-    let maxIdx = 4;
-    for (let i = 0; i < 9; i++) {
-        if (ss[i] > maxss) {
-            maxss = ss[i];
-            maxIdx = i;
-        }
-    }
-    return ibest + maxIdx - 4;
-}
-function shiftDownsampledFrequency(cd0Re, cd0Im, delf) {
-    if (delf === 0)
-        return;
-    const dphi = TWO_PI * delf * DT2;
-    let phi = 0;
-    for (let i = 0; i < NP2; i++) {
-        const re = cd0Re[i];
-        const im = cd0Im[i];
-        const c = Math.cos(phi);
-        const s = Math.sin(phi);
-        cd0Re[i] = re * c - im * s;
-        cd0Im[i] = re * s + im * c;
-        phi = (phi + dphi) % TWO_PI;
-    }
-}
-function extractSoftSymbols(cd0Re, cd0Im, ibest, workspace) {
-    const { s8, csRe, csIm, symbRe, symbIm } = workspace;
+function extractSoftSymbols(ibest, workspace) {
+    const { cd0Re, cd0Im, s8, csRe, csIm, symbRe, symbIm } = workspace;
     for (let k = 0; k < NN; k++) {
         const i1 = ibest + k * COSTAS_SYMBOL_LEN;
         symbRe.fill(0);
         symbIm.fill(0);
-        if (i1 >= 0 && i1 + COSTAS_SYMBOL_LEN - 1 < NP2) {
+        if (i1 >= 0 && i1 + COSTAS_SYMBOL_LEN - 1 <= NP2 - 1) {
             for (let j = 0; j < COSTAS_SYMBOL_LEN; j++) {
                 symbRe[j] = cd0Re[i1 + j];
                 symbIm[j] = cd0Im[i1 + j];
@@ -3757,36 +4306,23 @@ function extractSoftSymbols(cd0Re, cd0Im, ibest, workspace) {
         }
         fftComplex(symbRe, symbIm, false);
         for (let tone = 0; tone < 8; tone++) {
-            const re = symbRe[tone] / 1000;
-            const im = symbIm[tone] / 1000;
+            const re = symbRe[tone];
+            const im = symbIm[tone];
             const idx = tone * NN + k;
-            csRe[idx] = re;
-            csIm[idx] = im;
+            csRe[idx] = re / 1000;
+            csIm[idx] = im / 1000;
             s8[idx] = Math.sqrt(re * re + im * im);
         }
     }
 }
-function passesSyncGate(s8, minCostasHits) {
-    let nsync = 0;
-    for (let k = 0; k < COSTAS_BLOCKS; k++) {
-        for (const offset of SYNC_TIME_SHIFTS) {
-            let maxTone = 0;
-            let maxVal = -1;
-            for (let t = 0; t < 8; t++) {
-                const v = s8[t * NN + k + offset];
-                if (v > maxVal) {
-                    maxVal = v;
-                    maxTone = t;
-                }
-            }
-            if (maxTone === COSTAS[k])
-                nsync++;
-        }
-    }
-    return nsync >= minCostasHits;
-}
-function buildBitMetrics(workspace) {
-    const { csRe, csIm, bmeta, bmetb, bmetc, bmetd, s2 } = workspace;
+/**
+ * Bit metrics from coherent sums over 1, 2 and 3 symbols (a, b, c), the
+ * normalized single-symbol metric (d) and the largest of a-c (e).
+ * imetric=1 uses tone amplitudes, imetric=2 tone powers.
+ */
+function buildBitMetrics(imetric, workspace) {
+    const { csRe, csIm, bmeta, bmetb, bmetc, bmetd, bmete, s2 } = workspace;
+    const power = imetric === 2;
     bmeta.fill(0);
     bmetb.fill(0);
     bmetc.fill(0);
@@ -3798,47 +4334,50 @@ function buildBitMetrics(workspace) {
             for (let k = 1; k <= 29; k += nsym) {
                 const ks = ihalf === 1 ? k + 7 : k + 43;
                 for (let i = 0; i < nt; i++) {
-                    const i1 = Math.floor(i / 64);
-                    const i2 = Math.floor((i & 63) / 8);
+                    const i1 = i >> 6;
+                    const i2 = (i & 63) >> 3;
                     const i3 = i & 7;
+                    let sRe;
+                    let sIm;
                     if (nsym === 1) {
-                        const re = csRe[GRAY_MAP[i3] * NN + ks - 1];
-                        const im = csIm[GRAY_MAP[i3] * NN + ks - 1];
-                        s2[i] = Math.sqrt(re * re + im * im);
+                        sRe = csRe[GRAY_MAP[i3] * NN + ks - 1];
+                        sIm = csIm[GRAY_MAP[i3] * NN + ks - 1];
                     }
                     else if (nsym === 2) {
-                        const sRe = csRe[GRAY_MAP[i2] * NN + ks - 1] + csRe[GRAY_MAP[i3] * NN + ks];
-                        const sIm = csIm[GRAY_MAP[i2] * NN + ks - 1] + csIm[GRAY_MAP[i3] * NN + ks];
-                        s2[i] = Math.sqrt(sRe * sRe + sIm * sIm);
+                        sRe = csRe[GRAY_MAP[i2] * NN + ks - 1] + csRe[GRAY_MAP[i3] * NN + ks];
+                        sIm = csIm[GRAY_MAP[i2] * NN + ks - 1] + csIm[GRAY_MAP[i3] * NN + ks];
                     }
                     else {
-                        const sRe = csRe[GRAY_MAP[i1] * NN + ks - 1] +
-                            csRe[GRAY_MAP[i2] * NN + ks] +
-                            csRe[GRAY_MAP[i3] * NN + ks + 1];
-                        const sIm = csIm[GRAY_MAP[i1] * NN + ks - 1] +
-                            csIm[GRAY_MAP[i2] * NN + ks] +
-                            csIm[GRAY_MAP[i3] * NN + ks + 1];
-                        s2[i] = Math.sqrt(sRe * sRe + sIm * sIm);
+                        sRe =
+                            csRe[GRAY_MAP[i1] * NN + ks - 1] +
+                                csRe[GRAY_MAP[i2] * NN + ks] +
+                                csRe[GRAY_MAP[i3] * NN + ks + 1];
+                        sIm =
+                            csIm[GRAY_MAP[i1] * NN + ks - 1] +
+                                csIm[GRAY_MAP[i2] * NN + ks] +
+                                csIm[GRAY_MAP[i3] * NN + ks + 1];
                     }
+                    const p = sRe * sRe + sIm * sIm;
+                    s2[i] = power ? p : Math.sqrt(p);
                 }
                 const i32 = 1 + (k - 1) * 3 + (ihalf - 1) * 87;
                 for (let ib = 0; ib <= ibmax; ib++) {
+                    const idx = i32 + ib - 1;
+                    if (idx >= N_LDPC)
+                        continue;
+                    const bit = 1 << (ibmax - ib);
                     let max1 = -1e30;
                     let max0 = -1e30;
                     for (let i = 0; i < nt; i++) {
-                        const bitSet = (i & (1 << (ibmax - ib))) !== 0;
-                        if (bitSet) {
-                            if (s2[i] > max1)
-                                max1 = s2[i];
+                        const v = s2[i];
+                        if ((i & bit) !== 0) {
+                            if (v > max1)
+                                max1 = v;
                         }
-                        else {
-                            if (s2[i] > max0)
-                                max0 = s2[i];
+                        else if (v > max0) {
+                            max0 = v;
                         }
                     }
-                    const idx = i32 + ib - 1;
-                    if (idx < 0 || idx >= N_LDPC)
-                        continue;
                     const bm = max1 - max0;
                     if (nsym === 1) {
                         bmeta[idx] = bm;
@@ -3855,104 +4394,69 @@ function buildBitMetrics(workspace) {
             }
         }
     }
+    for (let i = 0; i < N_LDPC; i++) {
+        let e = bmeta[i];
+        if (Math.abs(bmetb[i]) > Math.abs(e))
+            e = bmetb[i];
+        if (Math.abs(bmetc[i]) > Math.abs(e))
+            e = bmetc[i];
+        bmete[i] = e;
+    }
     normalizeBmet(bmeta);
     normalizeBmet(bmetb);
     normalizeBmet(bmetc);
     normalizeBmet(bmetd);
+    normalizeBmet(bmete);
 }
-function tryDecodePasses(workspace, depth) {
-    const scalefac = 2.83;
-    const maxosd = depth >= 4 ? 2 : depth >= 3 ? 1 : depth >= 2 ? 0 : -1;
-    const bmetrics = [workspace.bmeta, workspace.bmetb, workspace.bmetc, workspace.bmetd];
-    workspace.apmask.fill(0);
-    for (let ipass = 0; ipass < 4; ipass++) {
-        const metric = bmetrics[ipass];
-        for (let i = 0; i < N_LDPC; i++)
-            workspace.llr[i] = scalefac * metric[i];
-        const result = decode174_91(workspace.llr, workspace.apmask, maxosd);
-        if (result && result.nharderrors >= 0 && result.nharderrors <= 36)
-            return result;
+function normalizeBmet(bmet) {
+    const n = bmet.length;
+    let sum = 0;
+    let sum2 = 0;
+    for (let i = 0; i < n; i++) {
+        sum += bmet[i];
+        sum2 += bmet[i] * bmet[i];
     }
-    if (depth >= 4) {
-        workspace.apmask.fill(0);
-        const apmag = maxAbsMetric(workspace.bmeta) * scalefac * 1.01;
-        for (let i = 0; i < N_LDPC; i++)
-            workspace.llr[i] = scalefac * workspace.bmeta[i];
-        for (let i = 0; i < CQ_AP_BITS.length; i++) {
-            workspace.apmask[i] = 1;
-            workspace.llr[i] = apmag * (CQ_AP_BITS[i] === 1 ? 1 : -1);
-        }
-        workspace.apmask[74] = 1;
-        workspace.apmask[75] = 1;
-        workspace.apmask[76] = 1;
-        workspace.llr[74] = -apmag;
-        workspace.llr[75] = -apmag;
-        workspace.llr[76] = apmag;
-        const result = decode174_91(workspace.llr, workspace.apmask, maxosd);
-        if (result && result.nharderrors >= 0 && result.nharderrors <= 36)
-            return result;
+    const avg = sum / n;
+    const avg2 = sum2 / n;
+    const variance = avg2 - avg * avg;
+    const sigma = variance > 0 ? Math.sqrt(variance) : Math.sqrt(avg2);
+    if (sigma > 0) {
+        for (let i = 0; i < n; i++)
+            bmet[i] = bmet[i] / sigma;
     }
-    return null;
 }
-function maxAbsMetric(metric) {
+function maxAbs(values) {
     let max = 0;
-    for (let i = 0; i < metric.length; i++) {
-        const v = Math.abs(metric[i]);
+    for (let i = 0; i < values.length; i++) {
+        const v = Math.abs(values[i]);
         if (v > max)
             max = v;
     }
     return max;
 }
-function isValidMessageType(message77) {
-    const n3v = (message77[71] << 2) | (message77[72] << 1) | message77[73];
-    const i3v = (message77[74] << 2) | (message77[75] << 1) | message77[76];
-    if (i3v > 5 || (i3v === 0 && n3v > 6))
-        return false;
-    if (i3v === 0 && n3v === 2)
-        return false;
-    return true;
-}
-function estimateSnr(s8, cw) {
-    let xsig = 0;
-    let xnoi = 0;
-    const itone = getTones(cw);
-    for (let i = 0; i < 79; i++) {
-        xsig += s8[itone[i] * NN + i] ** 2;
-        const ios = (itone[i] + 4) % 7;
-        xnoi += s8[ios * NN + i] ** 2;
-    }
-    let snr = 0.001;
-    const arg = xsig / Math.max(xnoi, 1e-30) - 1.0;
-    if (arg > 0.1)
-        snr = arg;
-    snr = 10 * Math.log10(snr) - 27.0;
-    return snr < -24 ? -24 : snr;
-}
 function getTones(cw) {
-    const tones = new Array(79).fill(0);
-    for (let i = 0; i < 7; i++)
+    const tones = new Array(NN).fill(0);
+    for (let i = 0; i < 7; i++) {
         tones[i] = COSTAS[i];
-    for (let i = 0; i < 7; i++)
         tones[36 + i] = COSTAS[i];
-    for (let i = 0; i < 7; i++)
         tones[72 + i] = COSTAS[i];
+    }
     let k = 7;
     for (let j = 1; j <= 58; j++) {
         const i = (j - 1) * 3;
         if (j === 30)
             k += 7;
-        const indx = cw[i] * 4 + cw[i + 1] * 2 + cw[i + 2];
-        tones[k] = GRAY_MAP[indx];
+        tones[k] = GRAY_MAP[cw[i] * 4 + cw[i + 1] * 2 + cw[i + 2]];
         k++;
     }
     return tones;
 }
 /**
- * Mix f0 to baseband and decimate by NDOWN (60x) by extracting frequency bins.
- * Identical to Fortran ft8_downsample.
+ * Mix f0 to baseband and decimate by NDOWN (60x) by extracting frequency bins
+ * of the long spectrum (ft8_downsample.f90).
  */
-function ft8Downsample(cxRe, cxIm, f0, workspace) {
-    const { cd0Re, cd0Im, shiftRe, shiftIm } = workspace;
+function ft8Downsample(f0, workspace) {
+    const { cxRe, cxIm, cd0Re, cd0Im, shiftRe, shiftIm } = workspace;
     const df = DOWNSAMPLE_DF;
     const baud = DOWNSAMPLE_BAUD;
     const i0 = Math.round(f0 / df);
@@ -3963,16 +4467,12 @@ function ft8Downsample(cxRe, cxIm, f0, workspace) {
     cd0Re.fill(0);
     cd0Im.fill(0);
     let k = 0;
-    for (let i = ib; i <= it; i++) {
-        if (k >= NFFT2)
-            break;
+    for (let i = ib; i <= it && k < NFFT2; i++) {
         cd0Re[k] = cxRe[i];
         cd0Im[k] = cxIm[i];
         k++;
     }
     for (let i = 0; i <= TAPER_LAST; i++) {
-        if (i >= NFFT2)
-            break;
         const tap = TAPER[TAPER_LAST - i];
         cd0Re[i] = cd0Re[i] * tap;
         cd0Im[i] = cd0Im[i] * tap;
@@ -3988,22 +4488,21 @@ function ft8Downsample(cxRe, cxIm, f0, workspace) {
     }
     const shift = i0 - ib;
     for (let i = 0; i < NFFT2; i++) {
-        let srcIdx = (i + shift) % NFFT2;
-        if (srcIdx < 0)
-            srcIdx += NFFT2;
-        shiftRe[i] = cd0Re[srcIdx];
-        shiftIm[i] = cd0Im[srcIdx];
+        let src = (i + shift) % NFFT2;
+        if (src < 0)
+            src += NFFT2;
+        shiftRe[i] = cd0Re[src];
+        shiftIm[i] = cd0Im[src];
     }
-    for (let i = 0; i < NFFT2; i++) {
-        cd0Re[i] = shiftRe[i];
-        cd0Im[i] = shiftIm[i];
-    }
+    cd0Re.set(shiftRe);
+    cd0Im.set(shiftIm);
     fftComplex(cd0Re, cd0Im, true);
     for (let i = 0; i < NFFT2; i++) {
         cd0Re[i] = cd0Re[i] * DOWNSAMPLE_SCALE;
         cd0Im[i] = cd0Im[i] * DOWNSAMPLE_SCALE;
     }
 }
+/** Sync power for a complex, downsampled FT8 signal (sync8d.f90). */
 function sync8d(cd0Re, cd0Im, i0, syncRe, syncIm) {
     let sync = 0;
     const stride = 36 * COSTAS_SYMBOL_LEN;
@@ -4028,99 +4527,235 @@ function sync8d(cd0Re, cd0Im, i0, syncRe, syncIm) {
     }
     return sync;
 }
-function normalizeBmet(bmet) {
-    const n = bmet.length;
-    let sum = 0;
-    let sum2 = 0;
-    for (let i = 0; i < n; i++) {
-        sum += bmet[i];
-        sum2 += bmet[i] * bmet[i];
-    }
-    const avg = sum / n;
-    const avg2 = sum2 / n;
-    const variance = avg2 - avg * avg;
-    const sigma = variance > 0 ? Math.sqrt(variance) : Math.sqrt(avg2);
-    if (sigma > 0) {
-        for (let i = 0; i < n; i++)
-            bmet[i] = bmet[i] / sigma;
-    }
-}
-function resample(input, fromRate, toRate, outLen) {
-    const out = new Float64Array(outLen);
-    const ratio = fromRate / toRate;
-    for (let i = 0; i < outLen; i++) {
-        const srcIdx = i * ratio;
-        const lo = Math.floor(srcIdx);
-        const frac = srcIdx - lo;
-        const v0 = lo < input.length ? (input[lo] ?? 0) : 0;
-        const v1 = lo + 1 < input.length ? (input[lo + 1] ?? 0) : 0;
-        out[i] = v0 * (1 - frac) + v1 * frac;
-    }
-    return out;
-}
-function subtractDecodedSignal(residual, result, toneCache) {
-    if (result.snr < MIN_SUBTRACTION_SNR)
-        return;
-    const msgKey = normalizeMessageKey(result.msg);
-    let tones = toneCache.get(msgKey);
-    if (!tones) {
-        try {
-            tones = encodeMessage$1(result.msg);
+/**
+ * Joint search over start time (i0±10 downsampled samples) and frequency
+ * offset (±2.5 Hz in 0.5 Hz steps) maximizing the sync8d Costas power.
+ *
+ * sync8d with a frequency tweak is the sum over the 21 Costas symbols of
+ * |DFT of a 32-sample window at (tone*6.25 + delf) Hz|², so each window's DFT
+ * is updated recursively (sliding DFT) as the start time advances.
+ */
+function searchTimeFrequency(cd0Re, cd0Im, i0, grid) {
+    const nt = SEARCH_TIME_STEPS;
+    const nf = SEARCH_FREQ_STEPS;
+    const first = i0 - SEARCH_TIME_HALF;
+    grid.fill(0);
+    for (let block = 0; block < 3 * COSTAS_BLOCKS; block++) {
+        const n = block % COSTAS_BLOCKS;
+        const offset = n * COSTAS_SYMBOL_LEN + SYNC_TIME_SHIFTS[(block / COSTAS_BLOCKS) | 0] * COSTAS_SYMBOL_LEN;
+        const tone = COSTAS[n];
+        for (let d = 0; d < nf; d++) {
+            const w = tone * nf + d;
+            const rotRe = SLIDE_ROT_RE[w];
+            const rotIm = SLIDE_ROT_IM[w];
+            const endRe = SLIDE_END_RE[w];
+            const endIm = SLIDE_END_IM[w];
+            const phase = w * COSTAS_SYMBOL_LEN;
+            let valid = false;
+            let xr = 0;
+            let xi = 0;
+            for (let k = 0; k < nt; k++) {
+                const i1 = first + k + offset;
+                if (i1 < 0 || i1 + COSTAS_SYMBOL_LEN - 1 >= NP2) {
+                    valid = false;
+                    continue;
+                }
+                if (!valid) {
+                    xr = 0;
+                    xi = 0;
+                    for (let j = 0; j < COSTAS_SYMBOL_LEN; j++) {
+                        const c = SLIDE_PHASE_RE[phase + j];
+                        const s = SLIDE_PHASE_IM[phase + j];
+                        const dr = cd0Re[i1 + j];
+                        const di = cd0Im[i1 + j];
+                        xr += dr * c - di * s;
+                        xi += dr * s + di * c;
+                    }
+                    valid = true;
+                }
+                else {
+                    // X_{i} = e^{iω} (X_{i-1} - x_{i-1} + x_{i+31} e^{-iω32})
+                    const lr = cd0Re[i1 + COSTAS_SYMBOL_LEN - 1];
+                    const li = cd0Im[i1 + COSTAS_SYMBOL_LEN - 1];
+                    const tr = xr - cd0Re[i1 - 1] + lr * endRe - li * endIm;
+                    const ti = xi - cd0Im[i1 - 1] + lr * endIm + li * endRe;
+                    xr = tr * rotRe - ti * rotIm;
+                    xi = tr * rotIm + ti * rotRe;
+                }
+                grid[d * nt + k] = grid[d * nt + k] + xr * xr + xi * xi;
+            }
         }
-        catch {
-            return;
+    }
+    let smax = 0;
+    let best = 0;
+    for (let idx = 0; idx < nf * nt; idx++) {
+        if (grid[idx] > smax) {
+            smax = grid[idx];
+            best = idx;
         }
-        toneCache.set(msgKey, tones);
     }
-    const waveI = generateFT8Waveform(tones, {
-        sampleRate: SAMPLE_RATE,
-        samplesPerSymbol: NSPS,
-        baseFrequency: result.freq,
-        initialPhase: 0,
-    });
-    const waveQ = generateFT8Waveform(tones, {
-        sampleRate: SAMPLE_RATE,
-        samplesPerSymbol: NSPS,
-        baseFrequency: result.freq,
-        initialPhase: SUBTRACTION_PHASE_SHIFT,
-    });
-    const start = Math.round(result.dt * SAMPLE_RATE);
-    let srcStart = start;
-    let tplStart = 0;
-    if (srcStart < 0) {
-        tplStart = -srcStart;
-        srcStart = 0;
+    const d = (best / nt) | 0;
+    return { ibest: first + (best % nt), delf: (d - SEARCH_FREQ_HALF) * SEARCH_FREQ_STEP };
+}
+// ── Signal subtraction (subtractft8.f90) ────────────────────────────────────
+/**
+ * Subtract a decoded FT8 signal from `dd`.
+ *
+ * The complex amplitude of the signal relative to an ideal reference waveform
+ * is estimated with a low-pass filter (cos² window, 4000 samples), so slow
+ * amplitude/phase drifts and small frequency errors are tracked:
+ *   camp(t)  = dd(t) * conj(cref(t))
+ *   cfilt(t) = LPF[camp(t)]
+ *   dd(t)   -= 2 * Re{cref(t) * cfilt(t)}
+ * The filter output is evaluated exactly (running sums) every SUBTRACT_BLOCK
+ * samples and linearly interpolated in between.
+ */
+function subtractft8(dd, tones, f0, dt, workspace) {
+    const { crefRe, crefIm } = workspace;
+    genFt8Cwave(tones, f0, workspace);
+    const nstart = Math.round(dt * SAMPLE_RATE);
+    const { cosTab, sinTab, sumw, massStart } = LPF;
+    // Block prefix sums of camp, camp*e^{+iθm} and camp*e^{-iθm} (θ = 2π/NFILT).
+    const nb = SUBTRACT_NBLOCKS;
+    const p0Re = workspace.sum0Re;
+    const p0Im = workspace.sum0Im;
+    const ppRe = workspace.sumPlusRe;
+    const ppIm = workspace.sumPlusIm;
+    const pmRe = workspace.sumMinusRe;
+    const pmIm = workspace.sumMinusIm;
+    let a0r = 0;
+    let a0i = 0;
+    let apr = 0;
+    let api = 0;
+    let amr = 0;
+    let ami = 0;
+    p0Re[0] = 0;
+    p0Im[0] = 0;
+    ppRe[0] = 0;
+    ppIm[0] = 0;
+    pmRe[0] = 0;
+    pmIm[0] = 0;
+    for (let b = 0; b < nb; b++) {
+        const iStart = b * SUBTRACT_BLOCK;
+        for (let i = iStart; i < iStart + SUBTRACT_BLOCK; i++) {
+            const j = nstart + i;
+            if (j < 0 || j >= NMAX)
+                continue;
+            const d = dd[j];
+            const xr = d * crefRe[i];
+            const xi = -d * crefIm[i];
+            const t = i % SUBTRACT_NFILT;
+            const c = cosTab[t];
+            const s = sinTab[t];
+            const xrc = xr * c;
+            const xis = xi * s;
+            const xrs = xr * s;
+            const xic = xi * c;
+            a0r += xr;
+            a0i += xi;
+            apr += xrc - xis;
+            api += xrs + xic;
+            amr += xrc + xis;
+            ami += xic - xrs;
+        }
+        p0Re[b + 1] = a0r;
+        p0Im[b + 1] = a0i;
+        ppRe[b + 1] = apr;
+        ppIm[b + 1] = api;
+        pmRe[b + 1] = amr;
+        pmIm[b + 1] = ami;
     }
-    const maxLen = Math.min(residual.length - srcStart, waveI.length - tplStart, waveQ.length - tplStart);
-    if (maxLen <= 0)
-        return;
-    let sii = 0;
-    let sqq = 0;
-    let siq = 0;
-    let sri = 0;
-    let srq = 0;
-    for (let i = 0; i < maxLen; i++) {
-        const wi = waveI[tplStart + i];
-        const wq = waveQ[tplStart + i];
-        const rv = residual[srcStart + i];
-        sii += wi * wi;
-        sqq += wq * wq;
-        siq += wi * wq;
-        sri += rv * wi;
-        srq += rv * wq;
+    // Filter output at block boundaries i = b*BLOCK: window covers [i-HALF, i+HALF).
+    const hb = SUBTRACT_HALF / SUBTRACT_BLOCK;
+    const outRe = workspace.cfiltRe;
+    const outIm = workspace.cfiltIm;
+    for (let b = 0; b <= nb; b++) {
+        const lo = Math.max(0, b - hb);
+        const hi = Math.min(nb, b + hb);
+        const s0r = p0Re[hi] - p0Re[lo];
+        const s0i = p0Im[hi] - p0Im[lo];
+        const spr = ppRe[hi] - ppRe[lo];
+        const spi = ppIm[hi] - ppIm[lo];
+        const smr = pmRe[hi] - pmRe[lo];
+        const smi = pmIm[hi] - pmIm[lo];
+        const t = (b * SUBTRACT_BLOCK) % SUBTRACT_NFILT;
+        const c = cosTab[t];
+        const s = sinTab[t];
+        // 0.5*S0 + 0.25*e^{-iθi}*S+ + 0.25*e^{+iθi}*S-
+        let yr = 0.5 * s0r + 0.25 * (c * spr + s * spi) + 0.25 * (c * smr - s * smi);
+        let yi = 0.5 * s0i + 0.25 * (c * spi - s * spr) + 0.25 * (c * smi + s * smr);
+        // Normalize by the window mass inside the frame (end correction).
+        let mass = sumw;
+        if (b < hb)
+            mass = massStart[b];
+        else if (b > nb - hb)
+            mass = massStart[nb - b];
+        yr /= mass;
+        yi /= mass;
+        outRe[b] = yr;
+        outIm[b] = yi;
     }
-    const det = sii * sqq - siq * siq;
-    if (det <= 1e-9)
-        return;
-    const ampI = (sri * sqq - srq * siq) / det;
-    const ampQ = (srq * sii - sri * siq) / det;
-    for (let i = 0; i < maxLen; i++) {
-        const wi = waveI[tplStart + i];
-        const wq = waveQ[tplStart + i];
-        const idx = srcStart + i;
-        residual[idx] = residual[idx] - SUBTRACTION_GAIN * (ampI * wi + ampQ * wq);
+    for (let b = 0; b < nb; b++) {
+        const y0r = outRe[b];
+        const y0i = outIm[b];
+        const dyr = (outRe[b + 1] - y0r) / SUBTRACT_BLOCK;
+        const dyi = (outIm[b + 1] - y0i) / SUBTRACT_BLOCK;
+        const iStart = b * SUBTRACT_BLOCK;
+        for (let q = 0; q < SUBTRACT_BLOCK; q++) {
+            const i = iStart + q;
+            const j = nstart + i;
+            if (j < 0 || j >= NMAX)
+                continue;
+            const yr = y0r + dyr * q;
+            const yi = y0i + dyi * q;
+            dd[j] = dd[j] - 2.0 * (yr * crefRe[i] - yi * crefIm[i]);
+        }
     }
 }
+/** Complex FT8 reference waveform (gen_ft8wave.f90 with icmplx=1). */
+function genFt8Cwave(tones, f0, workspace) {
+    const { crefRe, crefIm, dphi } = workspace;
+    const nsym = NN;
+    const nsps = NSPS;
+    const dphiPeak = TWO_PI / nsps;
+    const pulse = GFSK_PULSE;
+    dphi.fill(0);
+    for (let j = 0; j < nsym; j++) {
+        const ib = j * nsps;
+        const tone = tones[j];
+        if (tone === 0)
+            continue;
+        const f = dphiPeak * tone;
+        for (let i = 0; i < 3 * nsps; i++)
+            dphi[ib + i] = dphi[ib + i] + f * pulse[i];
+    }
+    const first = dphiPeak * tones[0];
+    const last = dphiPeak * tones[nsym - 1];
+    for (let i = 0; i < 2 * nsps; i++) {
+        dphi[i] = dphi[i] + first * pulse[nsps + i];
+        dphi[nsym * nsps + i] = dphi[nsym * nsps + i] + last * pulse[i];
+    }
+    const carrier = (TWO_PI * f0) / SAMPLE_RATE;
+    let phi = 0;
+    for (let k = 0; k < NFRAME; k++) {
+        crefRe[k] = Math.cos(phi);
+        crefIm[k] = Math.sin(phi);
+        phi += dphi[nsps + k] + carrier;
+        if (phi > TWO_PI)
+            phi -= TWO_PI;
+    }
+    const nramp = Math.round(nsps / 8);
+    for (let i = 0; i < nramp; i++) {
+        const up = (1 - Math.cos((TWO_PI * i) / (2 * nramp))) / 2;
+        crefRe[i] = crefRe[i] * up;
+        crefIm[i] = crefIm[i] * up;
+        const k1 = nsym * nsps - nramp + i;
+        const down = (1 + Math.cos((TWO_PI * i) / (2 * nramp))) / 2;
+        crefRe[k1] = crefRe[k1] * down;
+        crefIm[k1] = crefIm[k1] * down;
+    }
+}
+// ── Tables ──────────────────────────────────────────────────────────────────
 function buildTaper(size) {
     const taper = new Float64Array(size);
     const last = size - 1;
@@ -4142,36 +4777,105 @@ function buildCostasSyncTemplates() {
     }
     return { re, im };
 }
-function buildFrequencyShiftSyncTemplates() {
-    const templates = [];
-    for (let ifr = -5; ifr <= 5; ifr++) {
-        const delf = ifr * 0.5;
-        const dphi = TWO_PI * delf * DT2;
-        const twkRe = new Float64Array(COSTAS_SYMBOL_LEN);
-        const twkIm = new Float64Array(COSTAS_SYMBOL_LEN);
-        let phi = 0;
-        for (let j = 0; j < COSTAS_SYMBOL_LEN; j++) {
-            twkRe[j] = Math.cos(phi);
-            twkIm[j] = Math.sin(phi);
-            phi = (phi + dphi) % TWO_PI;
-        }
-        const re = new Float64Array(COSTAS_BLOCKS * COSTAS_SYMBOL_LEN);
-        const im = new Float64Array(COSTAS_BLOCKS * COSTAS_SYMBOL_LEN);
-        for (let i = 0; i < COSTAS_BLOCKS; i++) {
-            const base = i * COSTAS_SYMBOL_LEN;
+function buildSlidingDftTables() {
+    const n = 8 * SEARCH_FREQ_STEPS;
+    const rotRe = new Float64Array(n);
+    const rotIm = new Float64Array(n);
+    const endRe = new Float64Array(n);
+    const endIm = new Float64Array(n);
+    const phaseRe = new Float64Array(n * COSTAS_SYMBOL_LEN);
+    const phaseIm = new Float64Array(n * COSTAS_SYMBOL_LEN);
+    for (let tone = 0; tone < 8; tone++) {
+        for (let d = 0; d < SEARCH_FREQ_STEPS; d++) {
+            const w = tone * SEARCH_FREQ_STEPS + d;
+            const delf = (d - SEARCH_FREQ_HALF) * SEARCH_FREQ_STEP;
+            const omega = (TWO_PI * (tone * DOWNSAMPLE_BAUD + delf)) / FS2;
+            rotRe[w] = Math.cos(omega);
+            rotIm[w] = Math.sin(omega);
+            endRe[w] = Math.cos(-omega * COSTAS_SYMBOL_LEN);
+            endIm[w] = Math.sin(-omega * COSTAS_SYMBOL_LEN);
             for (let j = 0; j < COSTAS_SYMBOL_LEN; j++) {
-                const idx = base + j;
-                const csRe = COSTAS_SYNC.re[idx];
-                const csIm = COSTAS_SYNC.im[idx];
-                const tRe = twkRe[j] * csRe - twkIm[j] * csIm;
-                const tIm = twkRe[j] * csIm + twkIm[j] * csRe;
-                re[idx] = tRe;
-                im[idx] = tIm;
+                phaseRe[w * COSTAS_SYMBOL_LEN + j] = Math.cos(-omega * j);
+                phaseIm[w * COSTAS_SYMBOL_LEN + j] = Math.sin(-omega * j);
             }
         }
-        templates.push({ delf, re, im });
     }
-    return templates;
+    return { rotRe, rotIm, endRe, endIm, phaseRe, phaseIm };
+}
+/** Nuttall window normalized as in get_spectrum_baseline.f90. */
+function buildBaselineWindow() {
+    const w = new Float64Array(NFFT1);
+    const a0 = 0.3635819;
+    const a1 = -0.4891775;
+    const a2 = 0.1365995;
+    const a3 = -0.0106411;
+    let sum = 0;
+    for (let i = 0; i < NFFT1; i++) {
+        w[i] =
+            a0 +
+                a1 * Math.cos((TWO_PI * i) / NFFT1) +
+                a2 * Math.cos((2 * TWO_PI * i) / NFFT1) +
+                a3 * Math.cos((3 * TWO_PI * i) / NFFT1);
+        sum += w[i];
+    }
+    for (let i = 0; i < NFFT1; i++)
+        w[i] = ((w[i] / sum) * NSPS * 2) / 300.0;
+    return w;
+}
+// Abramowitz and Stegun 7.1.26 approximation.
+function erfApprox(x) {
+    const sign = x < 0 ? -1 : 1;
+    const ax = Math.abs(x);
+    const t = 1 / (1 + 0.3275911 * ax);
+    const y = 1 -
+        ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) *
+            t *
+            Math.exp(-ax * ax);
+    return sign * y;
+}
+function buildGfskPulse(bt) {
+    const pulse = new Float64Array(3 * NSPS);
+    const c = Math.PI * Math.sqrt(2 / Math.log(2)) * bt;
+    for (let i = 0; i < pulse.length; i++) {
+        const tt = (i + 1 - 1.5 * NSPS) / NSPS;
+        pulse[i] = 0.5 * (erfApprox(c * (tt + 0.5)) - erfApprox(c * (tt - 0.5)));
+    }
+    return pulse;
+}
+function buildSubtractionFilter() {
+    const cosTab = new Float64Array(SUBTRACT_NFILT);
+    const sinTab = new Float64Array(SUBTRACT_NFILT);
+    for (let t = 0; t < SUBTRACT_NFILT; t++) {
+        cosTab[t] = Math.cos((TWO_PI * t) / SUBTRACT_NFILT);
+        sinTab[t] = Math.sin((TWO_PI * t) / SUBTRACT_NFILT);
+    }
+    const w = (j) => Math.cos((Math.PI * j) / SUBTRACT_NFILT) ** 2;
+    let sumw = 0;
+    for (let j = -SUBTRACT_HALF; j < SUBTRACT_HALF; j++)
+        sumw += w(j);
+    // Window mass available b blocks from the frame edge: offsets [-b*BLOCK, HALF).
+    const hb = SUBTRACT_HALF / SUBTRACT_BLOCK;
+    const massStart = new Float64Array(hb + 1);
+    for (let b = 0; b <= hb; b++) {
+        let m = 0;
+        for (let j = -b * SUBTRACT_BLOCK; j < SUBTRACT_HALF; j++)
+            m += w(j);
+        massStart[b] = m;
+    }
+    return { cosTab, sinTab, sumw, massStart };
+}
+function resample(input, fromRate, toRate, outLen) {
+    const out = new Float64Array(outLen);
+    const ratio = fromRate / toRate;
+    for (let i = 0; i < outLen; i++) {
+        const srcIdx = i * ratio;
+        const lo = Math.floor(srcIdx);
+        const frac = srcIdx - lo;
+        const v0 = lo < input.length ? (input[lo] ?? 0) : 0;
+        const v1 = lo + 1 < input.length ? (input[lo + 1] ?? 0) : 0;
+        out[i] = v0 * (1 - frac) + v1 * frac;
+    }
+    return out;
 }
 
 /**

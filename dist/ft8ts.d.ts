@@ -60,11 +60,11 @@ interface DecodeOptions$1 {
     freqLow?: number;
     /** Upper frequency bound (Hz), default 3000 */
     freqHigh?: number;
-    /** Minimum sync threshold, default 1.2 */
+    /** Minimum sync threshold, default 1.18 */
     syncMin?: number;
     /** Decoding depth: 1=fast BP only, 2=BP+OSD, 3=deep */
     depth?: number;
-    /** Maximum candidates to process */
+    /** Maximum candidates to process, default 200 */
     maxCandidates?: number;
     /**
      * Hash call book for resolving hashed callsigns.
@@ -88,6 +88,8 @@ interface WaveformOptions {
 
 declare function encode$1(msg: string, options?: WaveformOptions): Float32Array;
 
+/** WSJT-X "Special operating activity" (ncontest) settings that affect FT8 decoding. */
+type FT8Contest = "NA_VHF" | "EU_VHF" | "FIELD_DAY" | "RTTY" | "WW_DIGI" | "ARRL_DIGI";
 interface DecodedMessage {
     freq: number;
     dt: number;
@@ -102,12 +104,19 @@ interface DecodeOptions {
     freqLow?: number;
     /** Upper frequency bound (Hz), default 3000 */
     freqHigh?: number;
-    /** Minimum sync threshold, default 1.3 */
+    /** Minimum sync threshold, default 2.1 for depth <= 2 and 1.3 for depth >= 3 (as in WSJT-X) */
     syncMin?: number;
-    /** Decoding depth: 1=fast BP only, 2=BP+OSD, 3=deep, 4=deeper AP/OSD */
+    /** Decoding depth: 1=fast BP only, 2=BP+OSD, 3=deep (values above 3 behave like 3) */
     depth?: number;
-    /** Maximum candidates to process */
+    /** Maximum candidates to process per pass, default 1000 */
     maxCandidates?: number;
+    /**
+     * WSJT-X "Special operating activity". Outside a contest (the default),
+     * standard messages containing "/R" or starting with "TU;" are rejected as
+     * likely false decodes, as in WSJT-X 3. It also selects the CQ form
+     * ("CQ TEST", "CQ FD", "CQ RU", "CQ WW") used for a priori decoding at depth 3.
+     */
+    contest?: FT8Contest;
     /**
      * Hash call book for resolving hashed callsigns.
      * When provided, decoded standard callsigns are saved into the book,
@@ -126,4 +135,4 @@ declare function decode(samples: Float32Array | Float64Array, options?: DecodeOp
 declare function encode(msg: string, options?: WaveformOptions): Float32Array;
 
 export { HashCallBook, decode$1 as decodeFT4, decode as decodeFT8, encode$1 as encodeFT4, encode as encodeFT8 };
-export type { DecodeOptions$1 as DecodeFT4Options, DecodeOptions, DecodedMessage$1 as DecodedFT4Message, DecodedMessage };
+export type { DecodeOptions$1 as DecodeFT4Options, DecodeOptions, DecodedMessage$1 as DecodedFT4Message, DecodedMessage, FT8Contest };
