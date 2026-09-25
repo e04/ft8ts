@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/e04/ft8ts/actions/workflows/test.yml/badge.svg)](https://github.com/e04/ft8ts/actions/workflows/test.yml)
 
-FT8/FT4 encoder and decoder in pure TypeScript. A port of the Fortran implementation from [WSJT-X](https://wsjt.sourceforge.io/wsjtx.html) v2.7.0.
+FT8/FT4 encoder and decoder in pure TypeScript. A port of the Fortran implementation from [WSJT-X](https://wsjt.sourceforge.io/wsjtx.html) v3.0.1.
 
 ## Overview
 
@@ -20,7 +20,7 @@ https://e04.github.io/ft8ts/example/browser/index.html
 
 ```bash
 # Decode WAV file (FT8 or FT4)
-npx @e04/ft8ts decode foo.wav [--mode ft8|ft4] [--low 200] [--high 3000] [--depth 2]
+npx @e04/ft8ts decode foo.wav [--mode ft8|ft4] [--low 200] [--high 3000] [--depth 2] [--contest NA_VHF]
 
 # Encode message to WAV file
 npx @e04/ft8ts encode "CQ JK1IFA PM95" [--out output.wav] [--df 1000]
@@ -120,9 +120,10 @@ const decoded = decodeFT4(samples, {
 | `sampleRate` | 12000 | Input audio sample rate (Hz) |
 | `freqLow` | 200 | Lower frequency bound (Hz) |
 | `freqHigh` | 3000 | Upper frequency bound (Hz) |
-| `syncMin` | FT8: 1.6 (depth ≤ 2) / 1.3 (depth 3), FT4: 1.2 | Minimum sync threshold |
+| `syncMin` | FT8: 2.1 (depth ≤ 2) / 1.3 (depth 3), FT4: 1.18 | Minimum sync threshold |
 | `depth` | 2 | Decoding depth: 1=fast BP only, 2=BP+OSD, 3=deep (values above 3 behave like 3) |
-| `maxCandidates` | 600 (FT8) / 100 (FT4) | Maximum candidates to process |
+| `maxCandidates` | 1000 (FT8) / 200 (FT4) | Maximum candidates to process |
+| `contest` | — | FT8 only. WSJT-X "Special operating activity": `NA_VHF`, `EU_VHF`, `FIELD_DAY`, `RTTY`, `WW_DIGI` or `ARRL_DIGI`. Without it, standard messages containing `/R` or starting with `TU;` are rejected as likely false decodes, as in WSJT-X 3 |
 | `hashCallBook` | — | `HashCallBook` instance for resolving hashed callsigns |
 
 ## Build
@@ -137,7 +138,7 @@ GPL-3.0
 
 ## References
 
-- [WSJT-X](https://wsjt.sourceforge.io/wsjtx.html) — Original Fortran implementation (v2.7.0), licensed under [GPL v3](https://www.gnu.org/licenses/gpl-3.0.html)
+- [WSJT-X](https://wsjt.sourceforge.io/wsjtx.html) — Original Fortran implementation (v3.0.1), licensed under [GPL v3](https://www.gnu.org/licenses/gpl-3.0.html)
 
 ## Related Projects
 

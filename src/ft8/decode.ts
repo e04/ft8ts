@@ -5,7 +5,7 @@ import type { HashCallBook } from "../util/hashcall.js";
 import { unpack77 } from "../util/unpack_jt77.js";
 import { COSTAS, GRAY_MAP } from "./constants.js";
 
-// Port of the WSJT-X v2.7.0 FT8 decoder (ft8_decode.f90, sync8.f90, ft8b.f90,
+// Port of the WSJT-X v3.0.1 FT8 decoder (ft8_decode.f90, sync8.f90, ft8b.f90,
 // subtractft8.f90, get_spectrum_baseline.f90).
 
 const NSPS = 1920;
@@ -31,7 +31,7 @@ const TWO_PI = 2 * Math.PI;
 const SYNC_DF = SAMPLE_RATE / NFFT1; // 3.125 Hz
 const SYNC_TSTEP = NSTEP / SAMPLE_RATE; // 0.04 s
 const SYNC_JZ = 62;
-const SYNC_MLAG = 10;
+const SYNC_MLAG = 13;
 const SYNC_NSSY = NSPS / NSTEP; // 4
 const SYNC_NFOS = NFFT1 / NSPS; // 2
 const SYNC_JSTRT = Math.trunc(0.5 / SYNC_TSTEP); // 12
@@ -56,14 +56,38 @@ const SEARCH_FREQ_STEPS = 2 * SEARCH_FREQ_HALF + 1;
 
 const LLR_SCALE = 2.83;
 const MAX_HARD_ERRORS = 36;
+const MIN_SNR = -25.0;
 
 const SUBTRACT_NFILT = 4000;
 const SUBTRACT_HALF = SUBTRACT_NFILT / 2;
 const SUBTRACT_BLOCK = 20;
 const SUBTRACT_NBLOCKS = NFRAME / SUBTRACT_BLOCK; // 7584
 
-/** CQ in the first 29 bits (i3=1 standard message), ft8b.f90 `mcq`. */
+/** WSJT-X "Special operating activity" (ncontest) settings that affect FT8 decoding. */
+export type FT8Contest = "NA_VHF" | "EU_VHF" | "FIELD_DAY" | "RTTY" | "WW_DIGI" | "ARRL_DIGI";
+
+/** CQ, CQ TEST, CQ FD, CQ RU and CQ WW in the first 29 bits (ft8b.f90 `mcq`, `mcqtest`, ...). */
 const MCQ = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0];
+const MCQTEST = [
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1, 0,
+];
+const MCQFD = [
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0,
+];
+const MCQRU = [
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0,
+];
+const MCQWW = [
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0,
+];
+const CQ_AP_BITS: Record<FT8Contest, number[]> = {
+	NA_VHF: MCQTEST,
+	EU_VHF: MCQTEST,
+	FIELD_DAY: MCQFD,
+	RTTY: MCQRU,
+	WW_DIGI: MCQWW,
+	ARRL_DIGI: MCQTEST,
+};
 
 const TAPER = buildTaper(TAPER_SIZE);
 const COSTAS_SYNC = buildCostasSyncTemplates();
@@ -94,12 +118,19 @@ export interface DecodeOptions {
 	freqLow?: number;
 	/** Upper frequency bound (Hz), default 3000 */
 	freqHigh?: number;
-	/** Minimum sync threshold, default 1.6 for depth <= 2 and 1.3 for depth >= 3 (as in WSJT-X) */
+	/** Minimum sync threshold, default 2.1 for depth <= 2 and 1.3 for depth >= 3 (as in WSJT-X) */
 	syncMin?: number;
 	/** Decoding depth: 1=fast BP only, 2=BP+OSD, 3=deep (values above 3 behave like 3) */
 	depth?: number;
-	/** Maximum candidates to process per pass, default 600 */
+	/** Maximum candidates to process per pass, default 1000 */
 	maxCandidates?: number;
+	/**
+	 * WSJT-X "Special operating activity". Outside a contest (the default),
+	 * standard messages containing "/R" or starting with "TU;" are rejected as
+	 * likely false decodes, as in WSJT-X 3. It also selects the CQ form
+	 * ("CQ TEST", "CQ FD", "CQ RU", "CQ WW") used for a priori decoding at depth 3.
+	 */
+	contest?: FT8Contest;
 	/**
 	 * Hash call book for resolving hashed callsigns.
 	 * When provided, decoded standard callsigns are saved into the book,
@@ -150,6 +181,7 @@ interface DecodeWorkspace {
 	bmetb: Float64Array;
 	bmetc: Float64Array;
 	bmetd: Float64Array;
+	bmete: Float64Array;
 	llr: Float64Array;
 	apmask: Int8Array;
 	ss: Float64Array;
@@ -183,9 +215,10 @@ export function decode(
 	const nfb = options.freqHigh ?? 3000;
 	// Depths above 3 are accepted and behave like 3.
 	const depth = Math.min(options.depth ?? 2, 3);
-	const syncmin = options.syncMin ?? (depth <= 2 ? 1.6 : 1.3);
-	const maxCandidates = options.maxCandidates ?? 600;
+	const syncmin = options.syncMin ?? (depth <= 2 ? 2.1 : 1.3);
+	const maxCandidates = options.maxCandidates ?? 1000;
 	const book = options.hashCallBook;
+	const contest = options.contest;
 
 	const dd =
 		sampleRate === SAMPLE_RATE
@@ -197,17 +230,10 @@ export function decode(
 	const seenMessages = new Set<string>();
 
 	const npass = depth <= 1 ? 2 : 3;
-	let n2 = 0;
 	for (let ipass = 1; ipass <= npass; ipass++) {
-		let ndeep = depth;
-		if (ipass === 1) {
-			if (depth === 3) ndeep = 2;
-		} else if (ipass === 2) {
-			n2 = decoded.length;
-			if (decoded.length === 0) break;
-		} else if (decoded.length - n2 === 0) {
-			break;
-		}
+		// Pass 1 uses amplitude bit metrics, later passes power metrics.
+		const imetric = ipass === 1 ? 1 : 2;
+		if (ipass === 3 && decoded.length === 0) break;
 
 		const { candidates, sbase } = sync8(dd, nfa, nfb, syncmin, maxCandidates);
 		computeLongSpectrum(dd, workspace);
@@ -226,7 +252,7 @@ export function decode(
 
 			const ibin = Math.max(1, Math.round(cand.freq / SYNC_DF));
 			const xbase = 10.0 ** (0.1 * (sbase[ibin]! - 40.0));
-			const result = ft8b(cand.freq, cand.dt, xbase, ndeep, book, workspace);
+			const result = ft8b(cand.freq, cand.dt, xbase, depth, imetric, contest, book, workspace);
 			if (!result) continue;
 
 			subtractft8(dd, result.tones, result.freq, result.dtSubtract, workspace);
@@ -281,6 +307,7 @@ function createDecodeWorkspace(): DecodeWorkspace {
 		bmetb: new Float64Array(N_LDPC),
 		bmetc: new Float64Array(N_LDPC),
 		bmetd: new Float64Array(N_LDPC),
+		bmete: new Float64Array(N_LDPC),
 		llr: new Float64Array(N_LDPC),
 		apmask: new Int8Array(N_LDPC),
 		ss: new Float64Array(9),
@@ -610,6 +637,8 @@ function ft8b(
 	xdtIn: number,
 	xbase: number,
 	ndepth: number,
+	imetric: number,
+	contest: FT8Contest | undefined,
 	book: HashCallBook | undefined,
 	workspace: DecodeWorkspace,
 ): Ft8bResult | null {
@@ -660,24 +689,29 @@ function ft8b(
 			if (ip === COSTAS[k]) nsync++;
 		}
 	}
-	if (nsync <= 6) return null;
+	let nsyncMin = imetric === 2 ? 7 : 6;
+	if (ndepth <= 2) nsyncMin = 8;
+	if (nsync <= nsyncMin) return null;
 
-	buildBitMetrics(workspace);
+	buildBitMetrics(imetric, workspace);
 
-	const { bmeta, bmetb, bmetc, bmetd, llr, apmask } = workspace;
-	const apmag = maxAbs(bmeta) * LLR_SCALE * 1.01;
-	const maxosd = ndepth <= 1 ? -1 : ndepth === 2 ? 0 : 2;
-	const npasses = ndepth >= 3 ? 5 : 4;
+	const { bmeta, bmetb, bmetc, bmetd, bmete, llr, apmask } = workspace;
+	const maxosd = ndepth <= 1 ? -1 : 2;
+	// Passes 1-5: regular decoding with each bit metric. Passes 6-7 (depth 3):
+	// a priori decoding of "CQ ??? ???" (iaptype=1) with metrics a and c.
+	const metrics = [bmeta, bmetb, bmetc, bmetd, bmete, bmeta, bmetc];
+	const npasses = ndepth >= 3 ? 7 : 5;
+	const mcq = contest ? CQ_AP_BITS[contest] : MCQ;
 
 	for (let ipass = 1; ipass <= npasses; ipass++) {
-		const metric = ipass === 2 ? bmetb : ipass === 3 ? bmetc : ipass === 4 ? bmetd : bmeta;
+		const metric = metrics[ipass - 1]!;
 		for (let i = 0; i < N_LDPC; i++) llr[i] = LLR_SCALE * metric[i]!;
 		apmask.fill(0);
-		if (ipass === 5) {
-			// AP pass: CQ ??? ??? (iaptype=1)
+		if (ipass > 5) {
+			const apmag = maxAbs(llr) * 1.1;
 			for (let i = 0; i < 29; i++) {
 				apmask[i] = 1;
-				llr[i] = apmag * (2 * MCQ[i]! - 1);
+				llr[i] = apmag * (2 * mcq[i]! - 1);
 			}
 			apmask[74] = 1;
 			apmask[75] = 1;
@@ -689,7 +723,7 @@ function ft8b(
 
 		const result = decode174_91(llr, apmask, maxosd, 2);
 		if (!result) continue;
-		const accepted = acceptCodeword(result, book);
+		const accepted = acceptCodeword(result, contest, book);
 		if (!accepted) continue;
 
 		// SNR relative to the spectrum baseline (WSJT-X xsnr2).
@@ -701,8 +735,8 @@ function ft8b(
 		if (arg > 0.1) xsnr = arg;
 		xsnr = 10.0 * Math.log10(xsnr) - 27.0;
 		// Likely false decode
-		if (nsync <= 10 && xsnr < -24.0) return null;
-		if (xsnr < -24.0) xsnr = -24.0;
+		if (nsync <= 10 && xsnr < MIN_SNR) return null;
+		if (xsnr < MIN_SNR) xsnr = MIN_SNR;
 
 		return { msg: accepted, freq: f1, dt: xdt, dtSubtract, snr: xsnr, tones };
 	}
@@ -710,7 +744,11 @@ function ft8b(
 	return null;
 }
 
-function acceptCodeword(result: DecodeResult, book: HashCallBook | undefined): string | null {
+function acceptCodeword(
+	result: DecodeResult,
+	contest: FT8Contest | undefined,
+	book: HashCallBook | undefined,
+): string | null {
 	if (result.nharderrors < 0 || result.nharderrors > MAX_HARD_ERRORS) return null;
 	if (result.cw.every((b) => b === 0)) return null;
 	const message77 = result.message91.slice(0, 77);
@@ -720,6 +758,10 @@ function acceptCodeword(result: DecodeResult, book: HashCallBook | undefined): s
 	if (i3 === 0 && n3 === 2) return null;
 	const { msg, success } = unpack77(message77, book);
 	if (!success || msg.trim().length === 0) return null;
+	// Rover and RTTY Roundup messages are rejected outside a contest.
+	if (!contest && i3 >= 1 && i3 <= 3 && (msg.includes("/R") || msg.startsWith("TU; "))) {
+		return null;
+	}
 	return msg;
 }
 
@@ -748,8 +790,14 @@ function extractSoftSymbols(ibest: number, workspace: DecodeWorkspace): void {
 	}
 }
 
-function buildBitMetrics(workspace: DecodeWorkspace): void {
-	const { csRe, csIm, bmeta, bmetb, bmetc, bmetd, s2 } = workspace;
+/**
+ * Bit metrics from coherent sums over 1, 2 and 3 symbols (a, b, c), the
+ * normalized single-symbol metric (d) and the largest of a-c (e).
+ * imetric=1 uses tone amplitudes, imetric=2 tone powers.
+ */
+function buildBitMetrics(imetric: number, workspace: DecodeWorkspace): void {
+	const { csRe, csIm, bmeta, bmetb, bmetc, bmetd, bmete, s2 } = workspace;
+	const power = imetric === 2;
 
 	bmeta.fill(0);
 	bmetb.fill(0);
@@ -768,25 +816,26 @@ function buildBitMetrics(workspace: DecodeWorkspace): void {
 					const i1 = i >> 6;
 					const i2 = (i & 63) >> 3;
 					const i3 = i & 7;
+					let sRe: number;
+					let sIm: number;
 					if (nsym === 1) {
-						const re = csRe[GRAY_MAP[i3]! * NN + ks - 1]!;
-						const im = csIm[GRAY_MAP[i3]! * NN + ks - 1]!;
-						s2[i] = Math.sqrt(re * re + im * im);
+						sRe = csRe[GRAY_MAP[i3]! * NN + ks - 1]!;
+						sIm = csIm[GRAY_MAP[i3]! * NN + ks - 1]!;
 					} else if (nsym === 2) {
-						const sRe = csRe[GRAY_MAP[i2]! * NN + ks - 1]! + csRe[GRAY_MAP[i3]! * NN + ks]!;
-						const sIm = csIm[GRAY_MAP[i2]! * NN + ks - 1]! + csIm[GRAY_MAP[i3]! * NN + ks]!;
-						s2[i] = Math.sqrt(sRe * sRe + sIm * sIm);
+						sRe = csRe[GRAY_MAP[i2]! * NN + ks - 1]! + csRe[GRAY_MAP[i3]! * NN + ks]!;
+						sIm = csIm[GRAY_MAP[i2]! * NN + ks - 1]! + csIm[GRAY_MAP[i3]! * NN + ks]!;
 					} else {
-						const sRe =
+						sRe =
 							csRe[GRAY_MAP[i1]! * NN + ks - 1]! +
 							csRe[GRAY_MAP[i2]! * NN + ks]! +
 							csRe[GRAY_MAP[i3]! * NN + ks + 1]!;
-						const sIm =
+						sIm =
 							csIm[GRAY_MAP[i1]! * NN + ks - 1]! +
 							csIm[GRAY_MAP[i2]! * NN + ks]! +
 							csIm[GRAY_MAP[i3]! * NN + ks + 1]!;
-						s2[i] = Math.sqrt(sRe * sRe + sIm * sIm);
 					}
+					const p = sRe * sRe + sIm * sIm;
+					s2[i] = power ? p : Math.sqrt(p);
 				}
 
 				const i32 = 1 + (k - 1) * 3 + (ihalf - 1) * 87;
@@ -820,10 +869,18 @@ function buildBitMetrics(workspace: DecodeWorkspace): void {
 		}
 	}
 
+	for (let i = 0; i < N_LDPC; i++) {
+		let e = bmeta[i]!;
+		if (Math.abs(bmetb[i]!) > Math.abs(e)) e = bmetb[i]!;
+		if (Math.abs(bmetc[i]!) > Math.abs(e)) e = bmetc[i]!;
+		bmete[i] = e;
+	}
+
 	normalizeBmet(bmeta);
 	normalizeBmet(bmetb);
 	normalizeBmet(bmetc);
 	normalizeBmet(bmetd);
+	normalizeBmet(bmete);
 }
 
 function normalizeBmet(bmet: Float64Array): void {

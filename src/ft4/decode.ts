@@ -56,11 +56,11 @@ export interface DecodeOptions {
 	freqLow?: number;
 	/** Upper frequency bound (Hz), default 3000 */
 	freqHigh?: number;
-	/** Minimum sync threshold, default 1.2 */
+	/** Minimum sync threshold, default 1.18 */
 	syncMin?: number;
 	/** Decoding depth: 1=fast BP only, 2=BP+OSD, 3=deep */
 	depth?: number;
-	/** Maximum candidates to process */
+	/** Maximum candidates to process, default 200 */
 	maxCandidates?: number;
 	/**
 	 * Hash call book for resolving hashed callsigns.
@@ -126,9 +126,9 @@ export function decode(
 	const sampleRate = options.sampleRate ?? SAMPLE_RATE;
 	const freqLow = options.freqLow ?? 200;
 	const freqHigh = options.freqHigh ?? 3000;
-	const syncMin = options.syncMin ?? 1.2;
+	const syncMin = options.syncMin ?? 1.18;
 	const depth = options.depth ?? 2;
-	const maxCandidates = options.maxCandidates ?? 100;
+	const maxCandidates = options.maxCandidates ?? 200;
 	const book = options.hashCallBook;
 
 	const dd =

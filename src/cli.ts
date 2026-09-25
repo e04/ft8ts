@@ -7,12 +7,21 @@ import {
 	decodeFT4,
 	decodeFT8,
 	encodeFT8,
+	type FT8Contest,
 } from "./index.js";
 import { parseWavBuffer, writeMono16WavFile } from "./util/wav.js";
 
 const SAMPLE_RATE = 12_000;
 const DEFAULT_OUTPUT = "output.wav";
 const DEFAULT_DF_HZ = 1_000;
+const CONTESTS: readonly FT8Contest[] = [
+	"NA_VHF",
+	"EU_VHF",
+	"FIELD_DAY",
+	"RTTY",
+	"WW_DIGI",
+	"ARRL_DIGI",
+];
 
 function printUsage(): void {
 	console.error(`ft8ts - FT8 encoder/decoder
@@ -26,7 +35,9 @@ Decode options:
   --low <hz>     Lower frequency bound (default: 200)
   --high <hz>    Upper frequency bound (default: 3000)
   --depth <1|2|3>  Decoding depth (default: 2)
-  --max-candidates <n>  Max candidate signals to decode (default: 600 for FT8, 100 for FT4)
+  --max-candidates <n>  Max candidate signals to decode (default: 1000 for FT8, 200 for FT4)
+  --contest <type>  FT8 special operating activity: ${CONTESTS.join(", ")}
+                   (without it, "/R" and "TU;" messages are rejected as in WSJT-X)
 
 Encode options:
   --out <file>   Output WAV file (default: output.wav)
@@ -69,6 +80,13 @@ function runDecode(argv: string[]): void {
 			options.depth = Number(argv[++i]);
 		} else if (arg === "--max-candidates") {
 			options.maxCandidates = Number(argv[++i]);
+		} else if (arg === "--contest") {
+			const value = argv[++i];
+			const contest = CONTESTS.find((c) => c === value?.toUpperCase());
+			if (!contest) {
+				throw new Error(`Invalid --contest: ${value ?? "(missing)"}. Use ${CONTESTS.join(", ")}`);
+			}
+			options.contest = contest;
 		} else {
 			throw new Error(`Unknown argument: ${arg}`);
 		}

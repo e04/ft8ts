@@ -119,6 +119,33 @@ describe("CLI", () => {
 		expect(stderr).toContain("Invalid --mode");
 	});
 
+	test("decode with invalid --contest exits 1", () => {
+		const { stderr, status } = runCli(["decode", "/tmp/dummy.wav", "--contest", "invalid"]);
+		expect(status).toBe(1);
+		expect(stderr).toContain("Invalid --contest");
+	});
+
+	test("decode finds a rover message only with --contest", () => {
+		const msg = "CQ TEST K1ABC/R FN42";
+		const wavPath = join(tmpdir(), `ft8ts-cli-contest-${process.pid}-${Date.now()}.wav`);
+
+		try {
+			const encodeResult = runCli(["encode", msg, "--out", wavPath, "--df", String(BASE_FREQ)]);
+			expect(encodeResult.status).toBe(0);
+
+			const args = ["decode", wavPath, "--low", "500", "--high", "1500"];
+			const plain = runCli(args);
+			expect(plain.status).toBe(0);
+			expect(plain.stdout).not.toContain(msg);
+
+			const contest = runCli([...args, "--contest", "na_vhf"]);
+			expect(contest.status).toBe(0);
+			expect(contest.stdout).toContain(msg);
+		} finally {
+			if (existsSync(wavPath)) unlinkSync(wavPath);
+		}
+	}, 30_000);
+
 	test("decode with --mode ft4 finds message in FT4 WAV", () => {
 		const msg = "CQ K1ABC FN42";
 		const wavPath = join(tmpdir(), `ft8ts-cli-ft4-${process.pid}-${Date.now()}.wav`);
