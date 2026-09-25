@@ -25,8 +25,8 @@ Decode options:
   --mode <ft8|ft4>  Mode: ft8 (default) or ft4
   --low <hz>     Lower frequency bound (default: 200)
   --high <hz>    Upper frequency bound (default: 3000)
-  --depth <1|2|3|4>  Decoding depth (default: 2)
-  --max-candidates <n>  Max candidate signals to decode (default: 300)
+  --depth <1|2|3>  Decoding depth (default: 2)
+  --max-candidates <n>  Max candidate signals to decode (default: 600 for FT8, 100 for FT4)
 
 Encode options:
   --out <file>   Output WAV file (default: output.wav)

@@ -28,32 +28,32 @@ npx @e04/ft8ts encode "CQ JK1IFA PM95" [--out output.wav] [--df 1000]
 
 ## Benchmark
 
-The benchmark below was compiled with reference to [Comparing PyFT8 with WSJT-x and FT8_lib](https://www.reddit.com/r/amateurradio/comments/1qt27ss/comparing_pyft8_with_wsjtx_and_ft8_lib/).
+The benchmark below was compiled with reference to [Comparing PyFT8 with WSJT-x and FT8_lib](https://www.reddit.com/r/amateurradio/comments/1qt27ss/comparing_pyft8_with_wsjtx_and_ft8_lib/) (sample: `210703_133430.wav`).
 
-| Call a | Call b | Message | WSJT-x(default) | WSJT-x (fast) | [PyFT8](https://github.com/G1OJS/PyFT8) | [ft8_lib](https://github.com/kgoba/ft8_lib) | ft8ts (depth=4) |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| W1FC | F5BZB | -8 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| WM3PEN | EA6VQ | -9 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| CQ | F5RXL | IN94 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| N1JFU | EA6EE | R-07 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| A92EE | F5PSR | -14 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| K1BZM | EA3GP | -9 | ☑️ | ☑️ | ☑️ | | ☑️ |
-| W0RSJ | EA3BMU | RR73 | ☑️ | ☑️ | ☑️ | | ☑️ |
-| K1JT | HA0DU | KN07 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| W1DIG | SV9CVY | -14 | ☑️ | ☑️ | ☑️ | | ☑️ |
-| K1JT | EA3AGB | -15 | ☑️ | ☑️ | ☑️ | | ☑️ |
-| XE2X | HA2NP | RR73 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| N1PJT | HB9CQK | -10 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
-| K1BZM | EA3CJ | JN01 | ☑️ | ☑️ | | | |
-| KD2UGC | F6GCP | R-23 | ☑️ | ☑️ | | | |
-| WA2FZW | DL5AXX | RR73 | ☑️ | | | | |
-| N1API | HA6FQ | -23 | ☑️ | | | | ☑️ |
-| N1API | F2VX | 73 | ☑️ | | | | ☑️ |
-| K1JT | HA5WA | 73 | ☑️ | | | | ☑️ |
-| CQ | EA2BFM | IN83 | ☑️ | | | | ☑️ |
-| K1BZM | DK8NE | -10 | | | | | ☑️ |
+| Call a | Call b | Message | WSJT-x(default) | WSJT-x (fast) | [PyFT8](https://github.com/G1OJS/PyFT8) | [ft8_lib](https://github.com/kgoba/ft8_lib) | ft8ts (depth=1) | ft8ts (depth=2, 3) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| W1FC | F5BZB | -8 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| WM3PEN | EA6VQ | -9 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| CQ | F5RXL | IN94 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| N1JFU | EA6EE | R-07 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| A92EE | F5PSR | -14 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| K1BZM | EA3GP | -9 | ☑️ | ☑️ | ☑️ | | ☑️ | ☑️ |
+| W0RSJ | EA3BMU | RR73 | ☑️ | ☑️ | ☑️ | | ☑️ | ☑️ |
+| K1JT | HA0DU | KN07 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| W1DIG | SV9CVY | -14 | ☑️ | ☑️ | ☑️ | | ☑️ | ☑️ |
+| K1JT | EA3AGB | -15 | ☑️ | ☑️ | ☑️ | | ☑️ | ☑️ |
+| XE2X | HA2NP | RR73 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| N1PJT | HB9CQK | -10 | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ | ☑️ |
+| K1BZM | EA3CJ | JN01 | ☑️ | ☑️ | | | ☑️ | ☑️ |
+| KD2UGC | F6GCP | R-23 | ☑️ | ☑️ | | | ☑️ | ☑️ |
+| WA2FZW | DL5AXX | RR73 | ☑️ | | | | ☑️ | ☑️ |
+| N1API | HA6FQ | -23 | ☑️ | | | | | ☑️ |
+| N1API | F2VX | 73 | ☑️ | | | | | ☑️ |
+| K1JT | HA5WA | 73 | ☑️ | | | | | ☑️ |
+| CQ | EA2BFM | IN83 | ☑️ | | | | | ☑️ |
+| K1BZM | DK8NE | -10 | | | | | | ☑️ |
 
-At its maximum depth mode (Depth 4), it successfully decodes 17 messages on this sample (including 17/20 rows in the table above), outperforming both `PyFT8` (12), `FT8_lib` (8), and `WSJT-x FAST mode` (14).
+At depth 2 (default) and depth 3, ft8ts decodes all 20 rows in the table above, plus `CQ DX DL8YHR JO41` (-16 dB), which is not listed in the original comparison: 21 messages in total, the same as WSJT-X 2.7.0 at its deepest setting. Even depth 1 (15 rows) outperforms `PyFT8` (12), `FT8_lib` (8), and `WSJT-x FAST mode` (14).
 
 ## Installation
 
@@ -120,9 +120,9 @@ const decoded = decodeFT4(samples, {
 | `sampleRate` | 12000 | Input audio sample rate (Hz) |
 | `freqLow` | 200 | Lower frequency bound (Hz) |
 | `freqHigh` | 3000 | Upper frequency bound (Hz) |
-| `syncMin` | 1.2 | Minimum sync threshold |
-| `depth` | 2 | Decoding depth: 1=fast BP only, 2=BP+OSD, 3=deep, 4=deeper AP/OSD |
-| `maxCandidates` | 300 (FT8) / 100 (FT4) | Maximum candidates to process |
+| `syncMin` | FT8: 1.6 (depth ≤ 2) / 1.3 (depth 3), FT4: 1.2 | Minimum sync threshold |
+| `depth` | 2 | Decoding depth: 1=fast BP only, 2=BP+OSD, 3=deep (values above 3 behave like 3) |
+| `maxCandidates` | 600 (FT8) / 100 (FT4) | Maximum candidates to process |
 | `hashCallBook` | — | `HashCallBook` instance for resolving hashed callsigns |
 
 ## Build
