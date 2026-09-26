@@ -1,6 +1,3 @@
-'use strict';
-
-var _documentCurrentScript = typeof document !== 'undefined' ? document.currentScript : null;
 /** Shared constants used by FT8, FT4, pack77, etc. */
 const SAMPLE_RATE = 12_000;
 /** LDPC(174,91) code (shared by FT8 and FT4). */
@@ -188,6 +185,130 @@ const NTOKENS = 2063592;
 const MAX22 = 4194304; // 2^22
 const MAX28 = 268435456; // 2^28
 const MAXGRID4 = 32400;
+
+/**
+ * Hash call table – TypeScript port of the hash call storage from packjt77.f90
+ *
+ * In FT8, nonstandard callsigns are transmitted as hashes (10-, 12-, or 22-bit).
+ * When a full callsign is decoded from a standard message, it is stored in this
+ * table so that future hashed references to it can be resolved.
+ *
+ * Mirrors Fortran: save_hash_call, hash10, hash12, hash22, ihashcall
+ */
+const MAGIC = 47055833459n;
+const MAX_HASH22_ENTRIES = 1000;
+function ihashcall$1(c0, m) {
+    const s = c0.padEnd(11, " ").slice(0, 11).toUpperCase();
+    let n8 = 0n;
+    for (let i = 0; i < 11; i++) {
+        const j = C38.indexOf(s[i] ?? " ");
+        n8 = 38n * n8 + BigInt(j < 0 ? 0 : j);
+    }
+    const prod = BigInt.asUintN(64, MAGIC * n8);
+    return Number(prod >> BigInt(64 - m)) & ((1 << m) - 1);
+}
+/**
+ * Maintains a callsign ↔ hash lookup table for resolving hashed FT8 callsigns.
+ *
+ * Usage:
+ * ```ts
+ * const book = new HashCallBook();
+ * const decoded = decodeFT8(samples, { sampleRate, hashCallBook: book });
+ * // `book` now contains callsigns learned from decoded messages.
+ * // Subsequent calls reuse the same book to resolve hashed callsigns:
+ * const decoded2 = decodeFT8(samples2, { sampleRate, hashCallBook: book });
+ * ```
+ *
+ * You can also pre-populate the book with known callsigns:
+ * ```ts
+ * book.save("W9XYZ");
+ * book.save("PJ4/K1ABC");
+ * ```
+ */
+class HashCallBook {
+    calls10 = new Map();
+    calls12 = new Map();
+    hash22Entries = [];
+    /**
+     * Store a callsign in all three hash tables (10, 12, 22-bit).
+     * Strips angle brackets if present. Ignores `<...>` and blank/short strings.
+     */
+    save(callsign) {
+        let cw = callsign.trim().toUpperCase();
+        if (cw === "" || cw === "<...>")
+            return;
+        if (cw.startsWith("<"))
+            cw = cw.slice(1);
+        const gt = cw.indexOf(">");
+        if (gt >= 0)
+            cw = cw.slice(0, gt);
+        cw = cw.trim();
+        if (cw.length < 3)
+            return;
+        const n10 = ihashcall$1(cw, 10);
+        if (n10 >= 0 && n10 <= 1023)
+            this.calls10.set(n10, cw);
+        const n12 = ihashcall$1(cw, 12);
+        if (n12 >= 0 && n12 <= 4095)
+            this.calls12.set(n12, cw);
+        const n22 = ihashcall$1(cw, 22);
+        const existing = this.hash22Entries.findIndex((e) => e.hash === n22);
+        if (existing >= 0) {
+            this.hash22Entries[existing].call = cw;
+        }
+        else {
+            if (this.hash22Entries.length >= MAX_HASH22_ENTRIES) {
+                this.hash22Entries.pop();
+            }
+            this.hash22Entries.unshift({ hash: n22, call: cw });
+        }
+    }
+    /** Look up a callsign by its 10-bit hash. Returns `null` if not found. */
+    lookup10(n10) {
+        if (n10 < 0 || n10 > 1023)
+            return null;
+        return this.calls10.get(n10) ?? null;
+    }
+    /** Look up a callsign by its 12-bit hash. Returns `null` if not found. */
+    lookup12(n12) {
+        if (n12 < 0 || n12 > 4095)
+            return null;
+        return this.calls12.get(n12) ?? null;
+    }
+    /** Look up a callsign by its 22-bit hash. Returns `null` if not found. */
+    lookup22(n22) {
+        const entry = this.hash22Entries.find((e) => e.hash === n22);
+        return entry?.call ?? null;
+    }
+    /** Number of entries in the 22-bit hash table. */
+    get size() {
+        return this.hash22Entries.length;
+    }
+    /** The contents of the book, to be restored with `restore`. */
+    snapshot() {
+        return {
+            calls10: [...this.calls10],
+            calls12: [...this.calls12],
+            hash22: this.hash22Entries.map((e) => ({ ...e })),
+        };
+    }
+    /** Replace the contents of the book with a `snapshot`. */
+    restore(snapshot) {
+        this.clear();
+        for (const [hash, call] of snapshot.calls10)
+            this.calls10.set(hash, call);
+        for (const [hash, call] of snapshot.calls12)
+            this.calls12.set(hash, call);
+        for (const e of snapshot.hash22)
+            this.hash22Entries.push({ ...e });
+    }
+    /** Remove all stored entries. */
+    clear() {
+        this.calls10.clear();
+        this.calls12.clear();
+        this.hash22Entries.length = 0;
+    }
+}
 
 /**
  * LDPC (174,91) parity check matrix data from ldpc_174_91_c_parity.f90
@@ -1736,802 +1857,6 @@ function unpack77(bits77, book) {
     return { msg: "", success: false };
 }
 
-/** FT4-specific constants (lib/ft4/ft4_params.f90). */
-const GRAYMAP = [0, 1, 3, 2];
-
-// Message scrambling vector (rvec) from WSJT-X.
-const RVEC = [
-    0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 1,
-    0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0,
-    1, 1, 1, 1, 1, 0, 0, 0, 1, 0, 1,
-];
-function xorWithScrambler(bits77) {
-    const out = new Array(77);
-    for (let i = 0; i < 77; i++) {
-        out[i] = ((bits77[i] ?? 0) + RVEC[i]) & 1;
-    }
-    return out;
-}
-
-const COSTAS_A$1 = [0, 1, 3, 2];
-const COSTAS_B$1 = [1, 0, 2, 3];
-const COSTAS_C$1 = [2, 3, 1, 0];
-const COSTAS_D$1 = [3, 2, 0, 1];
-const NSPS$1 = 576;
-const NFFT1$1 = 4 * NSPS$1; // 2304
-const NH1$1 = NFFT1$1 / 2; // 1152
-const NMAX$1 = 21 * 3456; // 72576
-const NHSYM$1 = Math.floor((NMAX$1 - NFFT1$1) / NSPS$1); // 122
-const NDOWN$1 = 18;
-const NN$1 = 103;
-const NFFT2$1 = NMAX$1 / NDOWN$1; // 4032
-const NSS = NSPS$1 / NDOWN$1; // 32
-const FS2$1 = SAMPLE_RATE / NDOWN$1; // 666.67 Hz
-const MAX_FREQ = 4910;
-const SYNC_PASS_MIN = 1.2;
-const TWO_PI$2 = 2 * Math.PI;
-const HARD_SYNC_PATTERNS = [
-    { offset: 0, bits: [0, 0, 0, 1, 1, 0, 1, 1] },
-    { offset: 66, bits: [0, 1, 0, 0, 1, 1, 1, 0] },
-    { offset: 132, bits: [1, 1, 1, 0, 0, 1, 0, 0] },
-    { offset: 198, bits: [1, 0, 1, 1, 0, 0, 0, 1] },
-];
-const COSTAS_BLOCKS$1 = 4;
-const FT4_SYNC_STRIDE = 33 * NSS;
-const FT4_MAX_TWEAK = 16;
-const LDPC_BITS = 174;
-const BITMETRIC_LEN = 2 * NN$1;
-const FRAME_LEN = NN$1 * NSS;
-const NUTTALL_WINDOW = makeNuttallWindow(NFFT1$1);
-const DOWNSAMPLE_CTX = createDownsampleContext();
-const TWEAKED_SYNC_TEMPLATES = createTweakedSyncTemplates();
-/**
- * Decode all FT4 signals in a buffer.
- * Input: mono audio samples at `sampleRate` Hz, duration ~6s.
- */
-function decode$1(samples, options = {}) {
-    const sampleRate = options.sampleRate ?? SAMPLE_RATE;
-    const freqLow = options.freqLow ?? 200;
-    const freqHigh = options.freqHigh ?? 3000;
-    const syncMin = options.syncMin ?? 1.18;
-    const depth = options.depth ?? 2;
-    const maxCandidates = options.maxCandidates ?? 200;
-    const book = options.hashCallBook;
-    const dd = sampleRate === SAMPLE_RATE
-        ? copySamplesToDecodeWindow$1(samples)
-        : resample$1(samples, sampleRate, SAMPLE_RATE, NMAX$1);
-    const cxRe = new Float64Array(NMAX$1);
-    const cxIm = new Float64Array(NMAX$1);
-    for (let i = 0; i < NMAX$1; i++)
-        cxRe[i] = dd[i] ?? 0;
-    fftComplex(cxRe, cxIm, false);
-    const candidates = getCandidates4(dd, freqLow, freqHigh, syncMin, maxCandidates);
-    if (candidates.length === 0)
-        return [];
-    const workspace = createDecodeWorkspace$1();
-    const decoded = [];
-    const seenMessages = new Set();
-    for (const candidate of candidates) {
-        const one = decodeCandidate(candidate, cxRe, cxIm, depth, book, workspace);
-        if (!one)
-            continue;
-        if (seenMessages.has(one.msg))
-            continue;
-        seenMessages.add(one.msg);
-        decoded.push(one);
-    }
-    return decoded;
-}
-function createDecodeWorkspace$1() {
-    return {
-        coarseRe: new Float64Array(NFFT2$1),
-        coarseIm: new Float64Array(NFFT2$1),
-        fineRe: new Float64Array(NFFT2$1),
-        fineIm: new Float64Array(NFFT2$1),
-        frameRe: new Float64Array(FRAME_LEN),
-        frameIm: new Float64Array(FRAME_LEN),
-        symbRe: new Float64Array(NSS),
-        symbIm: new Float64Array(NSS),
-        csRe: new Float64Array(4 * NN$1),
-        csIm: new Float64Array(4 * NN$1),
-        s4: new Float64Array(4 * NN$1),
-        s2: new Float64Array(1 << 8),
-        bitmetrics1: new Float64Array(BITMETRIC_LEN),
-        bitmetrics2: new Float64Array(BITMETRIC_LEN),
-        bitmetrics3: new Float64Array(BITMETRIC_LEN),
-        llra: new Float64Array(LDPC_BITS),
-        llrb: new Float64Array(LDPC_BITS),
-        llrc: new Float64Array(LDPC_BITS),
-        llr: new Float64Array(LDPC_BITS),
-        apmask: new Int8Array(LDPC_BITS),
-    };
-}
-function copySamplesToDecodeWindow$1(samples) {
-    const out = new Float64Array(NMAX$1);
-    const len = Math.min(samples.length, NMAX$1);
-    for (let i = 0; i < len; i++)
-        out[i] = samples[i];
-    return out;
-}
-function decodeCandidate(candidate, cxRe, cxIm, depth, book, workspace) {
-    ft4Downsample(cxRe, cxIm, candidate.freq, DOWNSAMPLE_CTX, workspace.coarseRe, workspace.coarseIm);
-    normalizeComplexPower(workspace.coarseRe, workspace.coarseIm, NMAX$1 / NDOWN$1);
-    for (let segment = 1; segment <= 3; segment++) {
-        const coarse = findBestSyncLocation(workspace.coarseRe, workspace.coarseIm, segment);
-        if (coarse.smax < SYNC_PASS_MIN)
-            continue;
-        const f1 = candidate.freq + coarse.idfbest;
-        if (f1 <= 10 || f1 >= 4990)
-            continue;
-        ft4Downsample(cxRe, cxIm, f1, DOWNSAMPLE_CTX, workspace.fineRe, workspace.fineIm);
-        normalizeComplexPower(workspace.fineRe, workspace.fineIm, NSS * NN$1);
-        extractFrame(workspace.fineRe, workspace.fineIm, coarse.ibest, workspace.frameRe, workspace.frameIm);
-        const badsync = buildBitMetrics$1(workspace.frameRe, workspace.frameIm, workspace);
-        if (badsync)
-            continue;
-        if (!passesHardSyncQuality(workspace.bitmetrics1))
-            continue;
-        buildLlrs(workspace);
-        const result = tryDecodePasses(workspace, depth);
-        if (!result)
-            continue;
-        const message77Scrambled = result.message91.slice(0, 77);
-        if (!hasNonZeroBit(message77Scrambled))
-            continue;
-        const message77 = xorWithScrambler(message77Scrambled);
-        const { msg, success } = unpack77(message77, book);
-        if (!success || msg.trim().length === 0)
-            continue;
-        return {
-            freq: f1,
-            dt: coarse.ibest / FS2$1 - 0.5,
-            snr: toFt4Snr(candidate.sync - 1.0),
-            msg,
-            sync: coarse.smax,
-        };
-    }
-    return null;
-}
-function findBestSyncLocation(cdRe, cdIm, segment) {
-    let ibest = -1;
-    let idfbest = 0;
-    let smax = -99;
-    for (let isync = 1; isync <= 2; isync++) {
-        let idfmin;
-        let idfmax;
-        let idfstp;
-        let ibmin;
-        let ibmax;
-        let ibstp;
-        if (isync === 1) {
-            idfmin = -12;
-            idfmax = 12;
-            idfstp = 3;
-            ibmin = -344;
-            ibmax = 1012;
-            if (segment === 1) {
-                ibmin = 108;
-                ibmax = 560;
-            }
-            else if (segment === 2) {
-                ibmin = 560;
-                ibmax = 1012;
-            }
-            else {
-                ibmin = -344;
-                ibmax = 108;
-            }
-            ibstp = 4;
-        }
-        else {
-            idfmin = idfbest - 4;
-            idfmax = idfbest + 4;
-            idfstp = 1;
-            ibmin = ibest - 5;
-            ibmax = ibest + 5;
-            ibstp = 1;
-        }
-        for (let idf = idfmin; idf <= idfmax; idf += idfstp) {
-            const templates = TWEAKED_SYNC_TEMPLATES.get(idf);
-            if (!templates)
-                continue;
-            for (let istart = ibmin; istart <= ibmax; istart += ibstp) {
-                const sync = sync4d(cdRe, cdIm, istart, templates);
-                if (sync > smax) {
-                    smax = sync;
-                    ibest = istart;
-                    idfbest = idf;
-                }
-            }
-        }
-    }
-    return { ibest, idfbest, smax };
-}
-function getCandidates4(dd, freqLow, freqHigh, syncMin, maxCandidates) {
-    const df = SAMPLE_RATE / NFFT1$1;
-    const fac = 1 / 300;
-    const savg = new Float64Array(NH1$1);
-    const s = new Float64Array(NH1$1 * NHSYM$1);
-    const savsm = new Float64Array(NH1$1);
-    const xRe = new Float64Array(NFFT1$1);
-    const xIm = new Float64Array(NFFT1$1);
-    for (let j = 0; j < NHSYM$1; j++) {
-        const ia = j * NSPS$1;
-        const ib = ia + NFFT1$1;
-        if (ib > NMAX$1)
-            break;
-        xIm.fill(0);
-        for (let i = 0; i < NFFT1$1; i++)
-            xRe[i] = fac * dd[ia + i] * NUTTALL_WINDOW[i];
-        fftComplex(xRe, xIm, false);
-        for (let bin = 1; bin <= NH1$1; bin++) {
-            const idx = bin - 1;
-            const re = xRe[bin] ?? 0;
-            const im = xIm[bin] ?? 0;
-            const power = re * re + im * im;
-            s[idx * NHSYM$1 + j] = power;
-            savg[idx] = (savg[idx] ?? 0) + power;
-        }
-    }
-    for (let i = 0; i < NH1$1; i++)
-        savg[i] = (savg[i] ?? 0) / NHSYM$1;
-    for (let i = 7; i < NH1$1 - 7; i++) {
-        let sum = 0;
-        for (let j = i - 7; j <= i + 7; j++)
-            sum += savg[j];
-        savsm[i] = sum / 15;
-    }
-    let nfa = Math.round(freqLow / df);
-    if (nfa < Math.round(200 / df))
-        nfa = Math.round(200 / df);
-    let nfb = Math.round(freqHigh / df);
-    if (nfb > Math.round(MAX_FREQ / df))
-        nfb = Math.round(MAX_FREQ / df);
-    const sbase = ft4Baseline(savg, nfa, nfb, df);
-    for (let bin = nfa; bin <= nfb; bin++) {
-        if ((sbase[bin - 1] ?? 0) <= 0)
-            return [];
-    }
-    for (let bin = nfa; bin <= nfb; bin++) {
-        const idx = bin - 1;
-        savsm[idx] = (savsm[idx] ?? 0) / sbase[idx];
-    }
-    const fOffset = (-1.5 * SAMPLE_RATE) / NSPS$1;
-    const candidates = [];
-    for (let i = nfa + 1; i <= nfb - 1; i++) {
-        const left = savsm[i - 2] ?? 0;
-        const center = savsm[i - 1] ?? 0;
-        const right = savsm[i] ?? 0;
-        if (center >= left && center >= right && center >= syncMin) {
-            const den = left - 2 * center + right;
-            const del = den !== 0 ? (0.5 * (left - right)) / den : 0;
-            const fpeak = (i + del) * df + fOffset;
-            if (fpeak < 200 || fpeak > MAX_FREQ)
-                continue;
-            const speak = center - 0.25 * (left - right) * del;
-            candidates.push({ freq: fpeak, sync: speak });
-        }
-    }
-    candidates.sort((a, b) => b.sync - a.sync);
-    return candidates.slice(0, maxCandidates);
-}
-function makeNuttallWindow(n) {
-    const out = new Float64Array(n);
-    const a0 = 0.3635819;
-    const a1 = -0.4891775;
-    const a2 = 0.1365995;
-    const a3 = -0.0106411;
-    for (let i = 0; i < n; i++) {
-        out[i] =
-            a0 +
-                a1 * Math.cos((2 * Math.PI * i) / n) +
-                a2 * Math.cos((4 * Math.PI * i) / n) +
-                a3 * Math.cos((6 * Math.PI * i) / n);
-    }
-    return out;
-}
-function ft4Baseline(savg, nfa, nfb, df) {
-    const sbase = new Float64Array(NH1$1);
-    sbase.fill(1);
-    const ia = Math.max(Math.round(200 / df), nfa);
-    const ib = Math.min(NH1$1, nfb);
-    if (ib <= ia)
-        return sbase;
-    const sDb = new Float64Array(NH1$1);
-    for (let i = ia; i <= ib; i++)
-        sDb[i - 1] = 10 * Math.log10(Math.max(1e-30, savg[i - 1]));
-    const nseg = 10;
-    const npct = 10;
-    const nlen = Math.max(1, Math.trunc((ib - ia + 1) / nseg));
-    const i0 = Math.trunc((ib - ia + 1) / 2);
-    const x = [];
-    const y = [];
-    for (let seg = 0; seg < nseg; seg++) {
-        const ja = ia + seg * nlen;
-        if (ja > ib)
-            break;
-        const jb = Math.min(ib, ja + nlen - 1);
-        const vals = [];
-        for (let i = ja; i <= jb; i++)
-            vals.push(sDb[i - 1]);
-        const base = percentile(vals, npct);
-        for (let i = ja; i <= jb; i++) {
-            const v = sDb[i - 1];
-            if (v <= base) {
-                x.push(i - i0);
-                y.push(v);
-            }
-        }
-    }
-    const coeff = x.length >= 5 ? polyfitLeastSquares(x, y, 4) : null;
-    if (coeff) {
-        for (let i = ia; i <= ib; i++) {
-            const t = i - i0;
-            const db = coeff[0] + t * (coeff[1] + t * (coeff[2] + t * (coeff[3] + t * coeff[4]))) + 0.65;
-            sbase[i - 1] = 10 ** (db / 10);
-        }
-    }
-    else {
-        const halfWindow = 25;
-        for (let i = ia; i <= ib; i++) {
-            const lo = Math.max(ia, i - halfWindow);
-            const hi = Math.min(ib, i + halfWindow);
-            let sum = 0;
-            let count = 0;
-            for (let j = lo; j <= hi; j++) {
-                sum += savg[j - 1];
-                count++;
-            }
-            sbase[i - 1] = count > 0 ? sum / count : 1;
-        }
-    }
-    return sbase;
-}
-function percentile(values, pct) {
-    if (values.length === 0)
-        return 0;
-    const sorted = [...values].sort((a, b) => a - b);
-    const idx = Math.max(0, Math.min(sorted.length - 1, Math.floor((pct / 100) * (sorted.length - 1))));
-    return sorted[idx];
-}
-function polyfitLeastSquares(x, y, degree) {
-    const n = degree + 1;
-    const mat = Array.from({ length: n }, () => new Float64Array(n + 1));
-    const xPows = new Float64Array(2 * degree + 1);
-    for (let p = 0; p <= 2 * degree; p++) {
-        let sum = 0;
-        for (let i = 0; i < x.length; i++)
-            sum += x[i] ** p;
-        xPows[p] = sum;
-    }
-    for (let row = 0; row < n; row++) {
-        for (let col = 0; col < n; col++)
-            mat[row][col] = xPows[row + col];
-        let rhs = 0;
-        for (let i = 0; i < x.length; i++)
-            rhs += y[i] * x[i] ** row;
-        mat[row][n] = rhs;
-    }
-    for (let col = 0; col < n; col++) {
-        let pivot = col;
-        let maxAbs = Math.abs(mat[col][col]);
-        for (let row = col + 1; row < n; row++) {
-            const a = Math.abs(mat[row][col]);
-            if (a > maxAbs) {
-                maxAbs = a;
-                pivot = row;
-            }
-        }
-        if (maxAbs < 1e-12)
-            return null;
-        if (pivot !== col) {
-            const tmp = mat[col];
-            mat[col] = mat[pivot];
-            mat[pivot] = tmp;
-        }
-        const pivotVal = mat[col][col];
-        for (let c = col; c <= n; c++)
-            mat[col][c] = mat[col][c] / pivotVal;
-        for (let row = 0; row < n; row++) {
-            if (row === col)
-                continue;
-            const factor = mat[row][col];
-            if (factor === 0)
-                continue;
-            for (let c = col; c <= n; c++)
-                mat[row][c] = mat[row][c] - factor * mat[col][c];
-        }
-    }
-    const coeff = new Array(n);
-    for (let i = 0; i < n; i++)
-        coeff[i] = mat[i][n];
-    return coeff;
-}
-function createDownsampleContext() {
-    const df = SAMPLE_RATE / NMAX$1;
-    const baud = SAMPLE_RATE / NSPS$1;
-    const bwTransition = 0.5 * baud;
-    const bwFlat = 4 * baud;
-    const iwt = Math.max(1, Math.trunc(bwTransition / df));
-    const iwf = Math.max(1, Math.trunc(bwFlat / df));
-    const iws = Math.trunc(baud / df);
-    const raw = new Float64Array(NFFT2$1);
-    for (let i = 0; i < iwt && i < raw.length; i++) {
-        raw[i] = 0.5 * (1 + Math.cos((Math.PI * (iwt - 1 - i)) / iwt));
-    }
-    for (let i = iwt; i < iwt + iwf && i < raw.length; i++)
-        raw[i] = 1;
-    for (let i = iwt + iwf; i < 2 * iwt + iwf && i < raw.length; i++) {
-        raw[i] = 0.5 * (1 + Math.cos((Math.PI * (i - (iwt + iwf))) / iwt));
-    }
-    const window = new Float64Array(NFFT2$1);
-    for (let i = 0; i < NFFT2$1; i++) {
-        const src = (i + iws) % NFFT2$1;
-        window[i] = raw[src];
-    }
-    return { df, window };
-}
-function ft4Downsample(cxRe, cxIm, f0, ctx, outRe, outIm) {
-    outRe.fill(0);
-    outIm.fill(0);
-    const i0 = Math.round(f0 / ctx.df);
-    if (i0 >= 0 && i0 <= NMAX$1 / 2) {
-        outRe[0] = cxRe[i0] ?? 0;
-        outIm[0] = cxIm[i0] ?? 0;
-    }
-    for (let i = 1; i <= NFFT2$1 / 2; i++) {
-        const hi = i0 + i;
-        if (hi >= 0 && hi <= NMAX$1 / 2) {
-            outRe[i] = cxRe[hi] ?? 0;
-            outIm[i] = cxIm[hi] ?? 0;
-        }
-        const lo = i0 - i;
-        if (lo >= 0 && lo <= NMAX$1 / 2) {
-            const idx = NFFT2$1 - i;
-            outRe[idx] = cxRe[lo] ?? 0;
-            outIm[idx] = cxIm[lo] ?? 0;
-        }
-    }
-    const scale = 1 / NFFT2$1;
-    for (let i = 0; i < NFFT2$1; i++) {
-        const w = (ctx.window[i] ?? 0) * scale;
-        outRe[i] = outRe[i] * w;
-        outIm[i] = outIm[i] * w;
-    }
-    fftComplex(outRe, outIm, true);
-}
-function normalizeComplexPower(re, im, denom) {
-    let sum = 0;
-    for (let i = 0; i < re.length; i++)
-        sum += re[i] * re[i] + im[i] * im[i];
-    if (sum <= 0)
-        return;
-    const scale = 1 / Math.sqrt(sum / denom);
-    for (let i = 0; i < re.length; i++) {
-        re[i] = re[i] * scale;
-        im[i] = im[i] * scale;
-    }
-}
-function extractFrame(cbRe, cbIm, ibest, outRe, outIm) {
-    for (let i = 0; i < outRe.length; i++) {
-        const src = ibest + i;
-        if (src >= 0 && src < cbRe.length) {
-            outRe[i] = cbRe[src];
-            outIm[i] = cbIm[src];
-        }
-        else {
-            outRe[i] = 0;
-            outIm[i] = 0;
-        }
-    }
-}
-function createTweakedSyncTemplates() {
-    const base = createBaseSyncTemplates();
-    const fsample = FS2$1 / 2;
-    const out = new Map();
-    for (let idf = -FT4_MAX_TWEAK; idf <= FT4_MAX_TWEAK; idf++) {
-        const tweak = createFrequencyTweak(idf, 2 * NSS, fsample);
-        out.set(idf, [
-            applyTweak(base[0], tweak),
-            applyTweak(base[1], tweak),
-            applyTweak(base[2], tweak),
-            applyTweak(base[3], tweak),
-        ]);
-    }
-    return out;
-}
-function createBaseSyncTemplates() {
-    return [
-        buildSyncTemplate(COSTAS_A$1),
-        buildSyncTemplate(COSTAS_B$1),
-        buildSyncTemplate(COSTAS_C$1),
-        buildSyncTemplate(COSTAS_D$1),
-    ];
-}
-function buildSyncTemplate(tones) {
-    const re = new Float64Array(2 * NSS);
-    const im = new Float64Array(2 * NSS);
-    let k = 0;
-    let phi = 0;
-    for (const tone of tones) {
-        const dphi = (TWO_PI$2 * tone * 2) / NSS;
-        for (let j = 0; j < NSS / 2; j++) {
-            re[k] = Math.cos(phi);
-            im[k] = Math.sin(phi);
-            phi = (phi + dphi) % TWO_PI$2;
-            k++;
-        }
-    }
-    return { re, im };
-}
-function createFrequencyTweak(idf, npts, fsample) {
-    const re = new Float64Array(npts);
-    const im = new Float64Array(npts);
-    const dphi = (TWO_PI$2 * idf) / fsample;
-    const stepRe = Math.cos(dphi);
-    const stepIm = Math.sin(dphi);
-    let wRe = 1;
-    let wIm = 0;
-    for (let i = 0; i < npts; i++) {
-        const newRe = wRe * stepRe - wIm * stepIm;
-        const newIm = wRe * stepIm + wIm * stepRe;
-        wRe = newRe;
-        wIm = newIm;
-        re[i] = wRe;
-        im[i] = wIm;
-    }
-    return { re, im };
-}
-function applyTweak(template, tweak) {
-    const re = new Float64Array(template.re.length);
-    const im = new Float64Array(template.im.length);
-    for (let i = 0; i < template.re.length; i++) {
-        const sr = template.re[i];
-        const si = template.im[i];
-        const tr = tweak.re[i];
-        const ti = tweak.im[i];
-        re[i] = tr * sr - ti * si;
-        im[i] = tr * si + ti * sr;
-    }
-    return { re, im };
-}
-function sync4d(cdRe, cdIm, i0, templates) {
-    let sync = 0;
-    for (let i = 0; i < COSTAS_BLOCKS$1; i++) {
-        const start = i0 + i * FT4_SYNC_STRIDE;
-        const z = correlateStride2(cdRe, cdIm, start, templates[i].re, templates[i].im);
-        if (z.count <= 16)
-            continue;
-        sync += Math.hypot(z.re, z.im) / (2 * NSS);
-    }
-    return sync;
-}
-function correlateStride2(cdRe, cdIm, start, templateRe, templateIm) {
-    let zRe = 0;
-    let zIm = 0;
-    let count = 0;
-    for (let i = 0; i < templateRe.length; i++) {
-        const idx = start + 2 * i;
-        if (idx < 0 || idx >= cdRe.length)
-            continue;
-        const sRe = templateRe[i];
-        const sIm = templateIm[i];
-        const dRe = cdRe[idx];
-        const dIm = cdIm[idx];
-        zRe += dRe * sRe + dIm * sIm;
-        zIm += dIm * sRe - dRe * sIm;
-        count++;
-    }
-    return { re: zRe, im: zIm, count };
-}
-function buildBitMetrics$1(cdRe, cdIm, workspace) {
-    const { csRe, csIm, s4, symbRe, symbIm, bitmetrics1, bitmetrics2, bitmetrics3, s2 } = workspace;
-    for (let k = 0; k < NN$1; k++) {
-        const i1 = k * NSS;
-        for (let i = 0; i < NSS; i++) {
-            symbRe[i] = cdRe[i1 + i];
-            symbIm[i] = cdIm[i1 + i];
-        }
-        fftComplex(symbRe, symbIm, false);
-        for (let tone = 0; tone < 4; tone++) {
-            const idx = tone * NN$1 + k;
-            const re = symbRe[tone];
-            const im = symbIm[tone];
-            csRe[idx] = re;
-            csIm[idx] = im;
-            s4[idx] = Math.hypot(re, im);
-        }
-    }
-    let nsync = 0;
-    for (let k = 0; k < 4; k++) {
-        if (maxTone(s4, k) === COSTAS_A$1[k])
-            nsync++;
-        if (maxTone(s4, 33 + k) === COSTAS_B$1[k])
-            nsync++;
-        if (maxTone(s4, 66 + k) === COSTAS_C$1[k])
-            nsync++;
-        if (maxTone(s4, 99 + k) === COSTAS_D$1[k])
-            nsync++;
-    }
-    bitmetrics1.fill(0);
-    bitmetrics2.fill(0);
-    bitmetrics3.fill(0);
-    if (nsync < 6)
-        return true;
-    for (let nseq = 1; nseq <= 3; nseq++) {
-        const nsym = nseq === 1 ? 1 : nseq === 2 ? 2 : 4;
-        const nt = 1 << (2 * nsym);
-        const ibmax = nseq === 1 ? 1 : nseq === 2 ? 3 : 7;
-        for (let ks = 1; ks <= NN$1 - nsym + 1; ks += nsym) {
-            for (let i = 0; i < nt; i++) {
-                const i1 = Math.floor(i / 64);
-                const i2 = Math.floor((i & 63) / 16);
-                const i3 = Math.floor((i & 15) / 4);
-                const i4 = i & 3;
-                if (nsym === 1) {
-                    const t = GRAYMAP[i4];
-                    const idx = t * NN$1 + (ks - 1);
-                    s2[i] = Math.hypot(csRe[idx], csIm[idx]);
-                }
-                else if (nsym === 2) {
-                    const t3 = GRAYMAP[i3];
-                    const t4 = GRAYMAP[i4];
-                    const iA = t3 * NN$1 + (ks - 1);
-                    const iB = t4 * NN$1 + ks;
-                    const re = csRe[iA] + csRe[iB];
-                    const im = csIm[iA] + csIm[iB];
-                    s2[i] = Math.hypot(re, im);
-                }
-                else {
-                    const t1 = GRAYMAP[i1];
-                    const t2 = GRAYMAP[i2];
-                    const t3 = GRAYMAP[i3];
-                    const t4 = GRAYMAP[i4];
-                    const iA = t1 * NN$1 + (ks - 1);
-                    const iB = t2 * NN$1 + ks;
-                    const iC = t3 * NN$1 + (ks + 1);
-                    const iD = t4 * NN$1 + (ks + 2);
-                    const re = csRe[iA] + csRe[iB] + csRe[iC] + csRe[iD];
-                    const im = csIm[iA] + csIm[iB] + csIm[iC] + csIm[iD];
-                    s2[i] = Math.hypot(re, im);
-                }
-            }
-            const ipt = 1 + (ks - 1) * 2;
-            for (let ib = 0; ib <= ibmax; ib++) {
-                const mask = 1 << (ibmax - ib);
-                let max1 = -1e30;
-                let max0 = -1e30;
-                for (let i = 0; i < nt; i++) {
-                    const v = s2[i];
-                    if ((i & mask) !== 0) {
-                        if (v > max1)
-                            max1 = v;
-                    }
-                    else if (v > max0) {
-                        max0 = v;
-                    }
-                }
-                const idx = ipt + ib;
-                if (idx > BITMETRIC_LEN)
-                    continue;
-                const bm = max1 - max0;
-                if (nseq === 1) {
-                    bitmetrics1[idx - 1] = bm;
-                }
-                else if (nseq === 2) {
-                    bitmetrics2[idx - 1] = bm;
-                }
-                else {
-                    bitmetrics3[idx - 1] = bm;
-                }
-            }
-        }
-    }
-    bitmetrics2[208] = bitmetrics1[208];
-    bitmetrics2[209] = bitmetrics1[209];
-    bitmetrics3[208] = bitmetrics1[208];
-    bitmetrics3[209] = bitmetrics1[209];
-    normalizeBitMetrics(bitmetrics1);
-    normalizeBitMetrics(bitmetrics2);
-    normalizeBitMetrics(bitmetrics3);
-    return false;
-}
-function maxTone(s4, symbolIndex) {
-    let bestTone = 0;
-    let bestValue = -1;
-    for (let tone = 0; tone < 4; tone++) {
-        const v = s4[tone * NN$1 + symbolIndex];
-        if (v > bestValue) {
-            bestValue = v;
-            bestTone = tone;
-        }
-    }
-    return bestTone;
-}
-function normalizeBitMetrics(bmet) {
-    let sum = 0;
-    let sum2 = 0;
-    for (let i = 0; i < bmet.length; i++) {
-        sum += bmet[i];
-        sum2 += bmet[i] * bmet[i];
-    }
-    const avg = sum / bmet.length;
-    const avg2 = sum2 / bmet.length;
-    const variance = avg2 - avg * avg;
-    const sigma = variance > 0 ? Math.sqrt(variance) : Math.sqrt(avg2);
-    if (sigma <= 0)
-        return;
-    for (let i = 0; i < bmet.length; i++)
-        bmet[i] = bmet[i] / sigma;
-}
-function passesHardSyncQuality(bitmetrics1) {
-    const hard = new Uint8Array(bitmetrics1.length);
-    for (let i = 0; i < bitmetrics1.length; i++)
-        hard[i] = bitmetrics1[i] >= 0 ? 1 : 0;
-    let score = 0;
-    for (const pattern of HARD_SYNC_PATTERNS) {
-        for (let i = 0; i < pattern.bits.length; i++) {
-            if (hard[pattern.offset + i] === pattern.bits[i])
-                score++;
-        }
-    }
-    return score >= 10;
-}
-function buildLlrs(workspace) {
-    const { bitmetrics1, bitmetrics2, bitmetrics3, llra, llrb, llrc } = workspace;
-    for (let i = 0; i < 58; i++) {
-        llra[i] = bitmetrics1[8 + i];
-        llra[58 + i] = bitmetrics1[74 + i];
-        llra[116 + i] = bitmetrics1[140 + i];
-        llrb[i] = bitmetrics2[8 + i];
-        llrb[58 + i] = bitmetrics2[74 + i];
-        llrb[116 + i] = bitmetrics2[140 + i];
-        llrc[i] = bitmetrics3[8 + i];
-        llrc[58 + i] = bitmetrics3[74 + i];
-        llrc[116 + i] = bitmetrics3[140 + i];
-    }
-}
-function tryDecodePasses(workspace, depth) {
-    const maxosd = depth >= 3 ? 2 : depth >= 2 ? 0 : -1;
-    const scalefac = 2.83;
-    const sources = [workspace.llra, workspace.llrb, workspace.llrc];
-    workspace.apmask.fill(0);
-    for (const src of sources) {
-        for (let i = 0; i < LDPC_BITS; i++)
-            workspace.llr[i] = scalefac * src[i];
-        const result = decode174_91(workspace.llr, workspace.apmask, maxosd);
-        if (result)
-            return result;
-    }
-    return null;
-}
-function hasNonZeroBit(bits) {
-    for (const bit of bits) {
-        if (bit !== 0)
-            return true;
-    }
-    return false;
-}
-function toFt4Snr(syncMinusOne) {
-    if (syncMinusOne > 0) {
-        return Math.round(Math.max(-21, 10 * Math.log10(syncMinusOne) - 14.8));
-    }
-    return -21;
-}
-function resample$1(input, fromRate, toRate, outLen) {
-    const out = new Float64Array(outLen);
-    const ratio = fromRate / toRate;
-    for (let i = 0; i < outLen; i++) {
-        const srcIdx = i * ratio;
-        const lo = Math.floor(srcIdx);
-        const frac = srcIdx - lo;
-        const v0 = lo < input.length ? (input[lo] ?? 0) : 0;
-        const v1 = lo + 1 < input.length ? (input[lo + 1] ?? 0) : 0;
-        out[i] = v0 * (1 - frac) + v1 * frac;
-    }
-    return out;
-}
-
 /**
  * FT8 message packing – TypeScript port of packjt77.f90
  *
@@ -2687,7 +2012,7 @@ function packtext77(c13) {
  *
  * Here we use m=10/12/22 for message types that carry hashed callsigns.
  */
-function ihashcall$1(c0, width) {
+function ihashcall(c0, width) {
     const C = C38;
     let n8 = 0n;
     const s = c0.padEnd(11, " ").slice(0, 11).toUpperCase();
@@ -2700,7 +2025,7 @@ function ihashcall$1(c0, width) {
     return Number(prod >> BigInt(64 - width)) & ((1 << width) - 1);
 }
 function ihashcall22(c0) {
-    return ihashcall$1(c0, 22);
+    return ihashcall(c0, 22);
 }
 /**
  * Checks whether c0 is a valid standard callsign (may also have /R or /P suffix).
@@ -2869,7 +2194,7 @@ function appendType0Suffix(bits, n3) {
  * - If the first word is "CQ" and there are ≥3 words and the 3rd word is a
  *   valid base callsign, merge words 1+2 into "CQ_<word2>" and shift the rest.
  */
-function split77$1(msg) {
+function split77(msg) {
     const parts = msg.trim().toUpperCase().replace(/\s+/g, " ").split(" ").filter(Boolean);
     if (parts.length >= 3 && parts[0] === "CQ") {
         // Check if word 3 (index 2) is a valid base callsign
@@ -2884,7 +2209,7 @@ function split77$1(msg) {
     return parts;
 }
 function pack77(msg) {
-    const parts = split77$1(msg);
+    const parts = split77(msg);
     if (parts.length < 1)
         throw new Error("Empty message");
     const dxpedition = tryPackType01(parts);
@@ -2941,7 +2266,7 @@ function tryPackType01(parts) {
     const bits = [];
     appendBits(bits, pack28(p1.basecall), 28);
     appendBits(bits, pack28(p2.basecall), 28);
-    appendBits(bits, ihashcall$1(hashed.slice(1, -1), 10), 10);
+    appendBits(bits, ihashcall(hashed.slice(1, -1), 10), 10);
     appendBits(bits, n5, 5);
     appendType0Suffix(bits, 1);
     return bits;
@@ -3025,7 +2350,7 @@ function tryPackWsprType1(parts) {
         return null;
     if (!parseCallsign(call).isStandard)
         return null;
-    if (!isGrid4$1(grid4))
+    if (!isGrid4(grid4))
         return null;
     const idbm = packDbm(dbmWord);
     if (idbm === null)
@@ -3165,7 +2490,7 @@ function tryPackType1(parts) {
     else {
         // Check whether wLast is a grid, report, or special
         const lastUpper = wLast.toUpperCase();
-        if (isGrid4$1(lastUpper)) {
+        if (isGrid4(lastUpper)) {
             igrid4 = packgrid4(lastUpper);
             ir = parts.length === 4 && parts[2] === "R" ? 1 : 0;
         }
@@ -3214,7 +2539,7 @@ function tryPackType1(parts) {
     appendBits(bits, i3, 3);
     return bits;
 }
-function isGrid4$1(s) {
+function isGrid4(s) {
     return (s.length === 4 &&
         s[0] >= "A" &&
         s[0] <= "R" &&
@@ -3388,8 +2713,8 @@ function tryPackType5(parts) {
     if (iserial > 2047)
         iserial = 2047;
     const bits = [];
-    appendBits(bits, ihashcall$1(w1.slice(1, -1), 12), 12);
-    appendBits(bits, ihashcall$1(w2.slice(1, -1), 22), 22);
+    appendBits(bits, ihashcall(w1.slice(1, -1), 12), 12);
+    appendBits(bits, ihashcall(w2.slice(1, -1), 22), 22);
     appendBits(bits, ir, 1);
     appendBits(bits, irpt, 3);
     appendBits(bits, iserial, 11);
@@ -3398,7 +2723,7 @@ function tryPackType5(parts) {
     return bits;
 }
 function ihashcall12(c0) {
-    return ihashcall$1(c0, 12);
+    return ihashcall(c0, 12);
 }
 function encodeC11(c11) {
     const padded = c11.padStart(11, " ");
@@ -3427,145 +2752,6 @@ function packFreeText(msg) {
     // Type 0.0: n3=0, i3=0 → last 6 bits are 000 000
     const bits = [...bits71, 0, 0, 0, 0, 0, 0];
     return bits; // 77 bits
-}
-
-const TWO_PI$1 = 2 * Math.PI;
-const FT8_DEFAULT_SAMPLE_RATE = 12_000;
-const FT8_DEFAULT_SAMPLES_PER_SYMBOL = 1_920;
-const FT8_DEFAULT_BT = 2.0;
-const FT4_DEFAULT_SAMPLE_RATE = 12_000;
-const FT4_DEFAULT_SAMPLES_PER_SYMBOL = 576;
-const FT4_DEFAULT_BT = 1.0;
-const MODULATION_INDEX = 1.0;
-function assertPositiveFinite(value, name) {
-    if (!Number.isFinite(value) || value <= 0) {
-        throw new Error(`${name} must be a positive finite number`);
-    }
-}
-// Abramowitz and Stegun 7.1.26 approximation.
-function erfApprox$1(x) {
-    const sign = x < 0 ? -1 : 1;
-    const ax = Math.abs(x);
-    const t = 1 / (1 + 0.3275911 * ax);
-    const y = 1 -
-        ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) *
-            t *
-            Math.exp(-ax * ax);
-    return sign * y;
-}
-function gfskPulse(bt, tt) {
-    // Same expression used by lib/ft2/gfsk_pulse.f90.
-    const scale = Math.PI * Math.sqrt(2 / Math.log(2)) * bt;
-    return 0.5 * (erfApprox$1(scale * (tt + 0.5)) - erfApprox$1(scale * (tt - 0.5)));
-}
-function generateGfskWaveform(tones, options, defaults, shape) {
-    const nsym = tones.length;
-    if (nsym === 0) {
-        return new Float32Array(0);
-    }
-    const sampleRate = options.sampleRate ?? defaults.sampleRate;
-    const nsps = options.samplesPerSymbol ?? defaults.samplesPerSymbol;
-    const bt = options.bt ?? defaults.bt;
-    const f0 = options.baseFrequency ?? 0;
-    const initialPhase = options.initialPhase ?? 0;
-    assertPositiveFinite(sampleRate, "sampleRate");
-    assertPositiveFinite(nsps, "samplesPerSymbol");
-    assertPositiveFinite(bt, "bt");
-    if (!Number.isFinite(f0)) {
-        throw new Error("baseFrequency must be finite");
-    }
-    if (!Number.isFinite(initialPhase)) {
-        throw new Error("initialPhase must be finite");
-    }
-    if (!Number.isInteger(nsps)) {
-        throw new Error("samplesPerSymbol must be an integer");
-    }
-    const nwave = (shape.includeRampSymbols ? nsym + 2 : nsym) * nsps;
-    const pulse = new Float64Array(3 * nsps);
-    for (let i = 0; i < pulse.length; i++) {
-        const tt = (i + 1 - 1.5 * nsps) / nsps;
-        pulse[i] = gfskPulse(bt, tt);
-    }
-    const dphi = new Float64Array((nsym + 2) * nsps);
-    const dphiPeak = (TWO_PI$1 * MODULATION_INDEX) / nsps;
-    for (let j = 0; j < nsym; j++) {
-        const tone = tones[j];
-        const ib = j * nsps;
-        for (let i = 0; i < pulse.length; i++) {
-            dphi[ib + i] += dphiPeak * pulse[i] * tone;
-        }
-    }
-    const firstTone = tones[0];
-    const lastTone = tones[nsym - 1];
-    const tailBase = nsym * nsps;
-    for (let i = 0; i < 2 * nsps; i++) {
-        dphi[i] += dphiPeak * firstTone * pulse[nsps + i];
-        dphi[tailBase + i] += dphiPeak * lastTone * pulse[i];
-    }
-    const carrierDphi = (TWO_PI$1 * f0) / sampleRate;
-    for (let i = 0; i < dphi.length; i++) {
-        dphi[i] += carrierDphi;
-    }
-    const wave = new Float32Array(nwave);
-    let phi = initialPhase % TWO_PI$1;
-    if (phi < 0)
-        phi += TWO_PI$1;
-    const phaseStart = shape.includeRampSymbols ? 0 : nsps;
-    for (let k = 0; k < nwave; k++) {
-        const j = phaseStart + k;
-        wave[k] = Math.sin(phi);
-        phi += dphi[j];
-        phi %= TWO_PI$1;
-        if (phi < 0) {
-            phi += TWO_PI$1;
-        }
-    }
-    if (shape.fullSymbolRamp) {
-        for (let i = 0; i < nsps; i++) {
-            const up = (1 - Math.cos((TWO_PI$1 * i) / (2 * nsps))) / 2;
-            wave[i] *= up;
-        }
-        const tailStart = (nsym + 1) * nsps;
-        for (let i = 0; i < nsps; i++) {
-            const down = (1 + Math.cos((TWO_PI$1 * i) / (2 * nsps))) / 2;
-            wave[tailStart + i] *= down;
-        }
-    }
-    else {
-        const nramp = Math.round(nsps / 8);
-        for (let i = 0; i < nramp; i++) {
-            const up = (1 - Math.cos((TWO_PI$1 * i) / (2 * nramp))) / 2;
-            wave[i] *= up;
-        }
-        const tailStart = nwave - nramp;
-        for (let i = 0; i < nramp; i++) {
-            const down = (1 + Math.cos((TWO_PI$1 * i) / (2 * nramp))) / 2;
-            wave[tailStart + i] *= down;
-        }
-    }
-    return wave;
-}
-function generateFT8Waveform(tones, options = {}) {
-    // Mirrors the FT8 path in lib/ft8/gen_ft8wave.f90.
-    return generateGfskWaveform(tones, options, {
-        sampleRate: FT8_DEFAULT_SAMPLE_RATE,
-        samplesPerSymbol: FT8_DEFAULT_SAMPLES_PER_SYMBOL,
-        bt: FT8_DEFAULT_BT,
-    }, {
-        includeRampSymbols: false,
-        fullSymbolRamp: false,
-    });
-}
-function generateFT4Waveform(tones, options = {}) {
-    // Mirrors lib/ft4/gen_ft4wave.f90.
-    return generateGfskWaveform(tones, options, {
-        sampleRate: FT4_DEFAULT_SAMPLE_RATE,
-        samplesPerSymbol: FT4_DEFAULT_SAMPLES_PER_SYMBOL,
-        bt: FT4_DEFAULT_BT,
-    }, {
-        includeRampSymbols: true,
-        fullSymbolRamp: true,
-    });
 }
 
 /** FT8-specific constants (lib/ft8/ft8_params.f90). */
@@ -3623,7 +2809,7 @@ function encode174_91(msg77) {
     }
     return codeword;
 }
-function getTones$2(codeword) {
+function getTones$1(codeword) {
     const tones = new Array(79).fill(0);
     for (let i = 0; i < 7; i++)
         tones[i] = COSTAS[i];
@@ -3642,252 +2828,9 @@ function getTones$2(codeword) {
     }
     return tones;
 }
-function encodeMessage$1(msg) {
-    const bits77 = pack77(msg);
-    const codeword = encode174_91(bits77);
-    return getTones$2(codeword);
-}
-function encode$1(msg, options = {}) {
-    return generateFT8Waveform(encodeMessage$1(msg), options);
-}
 
-const COSTAS_A = [0, 1, 3, 2];
-const COSTAS_B = [1, 0, 2, 3];
-const COSTAS_C = [2, 3, 1, 0];
-const COSTAS_D = [3, 2, 0, 1];
-/**
- * Convert FT4 LDPC codeword bits into 103 channel tones.
- * Port of lib/ft4/genft4.f90.
- */
-function getTones$1(codeword) {
-    const dataTones = new Array(87);
-    for (let i = 0; i < 87; i++) {
-        const b0 = codeword[2 * i] ?? 0;
-        const b1 = codeword[2 * i + 1] ?? 0;
-        const symbol = b1 + 2 * b0;
-        dataTones[i] = GRAYMAP[symbol];
-    }
-    const tones = new Array(103);
-    tones.splice(0, 4, ...COSTAS_A);
-    tones.splice(4, 29, ...dataTones.slice(0, 29));
-    tones.splice(33, 4, ...COSTAS_B);
-    tones.splice(37, 29, ...dataTones.slice(29, 58));
-    tones.splice(66, 4, ...COSTAS_C);
-    tones.splice(70, 29, ...dataTones.slice(58, 87));
-    tones.splice(99, 4, ...COSTAS_D);
-    return tones;
-}
-function encodeMessage(msg) {
-    const bits77 = pack77(msg);
-    const scrambled = xorWithScrambler(bits77);
-    const codeword = encode174_91(scrambled);
-    return getTones$1(codeword);
-}
-function encode(msg, options = {}) {
-    return generateFT4Waveform(encodeMessage(msg), options);
-}
-
-/**
- * Hash call table – TypeScript port of the hash call storage from packjt77.f90
- *
- * In FT8, nonstandard callsigns are transmitted as hashes (10-, 12-, or 22-bit).
- * When a full callsign is decoded from a standard message, it is stored in this
- * table so that future hashed references to it can be resolved.
- *
- * Mirrors Fortran: save_hash_call, hash10, hash12, hash22, ihashcall
- */
-const MAGIC = 47055833459n;
-const MAX_HASH22_ENTRIES = 1000;
-function ihashcall(c0, m) {
-    const s = c0.padEnd(11, " ").slice(0, 11).toUpperCase();
-    let n8 = 0n;
-    for (let i = 0; i < 11; i++) {
-        const j = C38.indexOf(s[i] ?? " ");
-        n8 = 38n * n8 + BigInt(j < 0 ? 0 : j);
-    }
-    const prod = BigInt.asUintN(64, MAGIC * n8);
-    return Number(prod >> BigInt(64 - m)) & ((1 << m) - 1);
-}
-/**
- * Maintains a callsign ↔ hash lookup table for resolving hashed FT8 callsigns.
- *
- * Usage:
- * ```ts
- * const book = new HashCallBook();
- * const decoded = decodeFT8(samples, { sampleRate, hashCallBook: book });
- * // `book` now contains callsigns learned from decoded messages.
- * // Subsequent calls reuse the same book to resolve hashed callsigns:
- * const decoded2 = decodeFT8(samples2, { sampleRate, hashCallBook: book });
- * ```
- *
- * You can also pre-populate the book with known callsigns:
- * ```ts
- * book.save("W9XYZ");
- * book.save("PJ4/K1ABC");
- * ```
- */
-class HashCallBook {
-    calls10 = new Map();
-    calls12 = new Map();
-    hash22Entries = [];
-    /**
-     * Store a callsign in all three hash tables (10, 12, 22-bit).
-     * Strips angle brackets if present. Ignores `<...>` and blank/short strings.
-     */
-    save(callsign) {
-        let cw = callsign.trim().toUpperCase();
-        if (cw === "" || cw === "<...>")
-            return;
-        if (cw.startsWith("<"))
-            cw = cw.slice(1);
-        const gt = cw.indexOf(">");
-        if (gt >= 0)
-            cw = cw.slice(0, gt);
-        cw = cw.trim();
-        if (cw.length < 3)
-            return;
-        const n10 = ihashcall(cw, 10);
-        if (n10 >= 0 && n10 <= 1023)
-            this.calls10.set(n10, cw);
-        const n12 = ihashcall(cw, 12);
-        if (n12 >= 0 && n12 <= 4095)
-            this.calls12.set(n12, cw);
-        const n22 = ihashcall(cw, 22);
-        const existing = this.hash22Entries.findIndex((e) => e.hash === n22);
-        if (existing >= 0) {
-            this.hash22Entries[existing].call = cw;
-        }
-        else {
-            if (this.hash22Entries.length >= MAX_HASH22_ENTRIES) {
-                this.hash22Entries.pop();
-            }
-            this.hash22Entries.unshift({ hash: n22, call: cw });
-        }
-    }
-    /** Look up a callsign by its 10-bit hash. Returns `null` if not found. */
-    lookup10(n10) {
-        if (n10 < 0 || n10 > 1023)
-            return null;
-        return this.calls10.get(n10) ?? null;
-    }
-    /** Look up a callsign by its 12-bit hash. Returns `null` if not found. */
-    lookup12(n12) {
-        if (n12 < 0 || n12 > 4095)
-            return null;
-        return this.calls12.get(n12) ?? null;
-    }
-    /** Look up a callsign by its 22-bit hash. Returns `null` if not found. */
-    lookup22(n22) {
-        const entry = this.hash22Entries.find((e) => e.hash === n22);
-        return entry?.call ?? null;
-    }
-    /** Number of entries in the 22-bit hash table. */
-    get size() {
-        return this.hash22Entries.length;
-    }
-    /** The contents of the book, to be restored with `restore`. */
-    snapshot() {
-        return {
-            calls10: [...this.calls10],
-            calls12: [...this.calls12],
-            hash22: this.hash22Entries.map((e) => ({ ...e })),
-        };
-    }
-    /** Replace the contents of the book with a `snapshot`. */
-    restore(snapshot) {
-        this.clear();
-        for (const [hash, call] of snapshot.calls10)
-            this.calls10.set(hash, call);
-        for (const [hash, call] of snapshot.calls12)
-            this.calls12.set(hash, call);
-        for (const e of snapshot.hash22)
-            this.hash22Entries.push({ ...e });
-    }
-    /** Remove all stored entries. */
-    clear() {
-        this.calls10.clear();
-        this.calls12.clear();
-        this.hash22Entries.length = 0;
-    }
-}
-
-// Port of the "a7" decode table and candidate messages of WSJT-X v3.0.1
-// (ft8_a7.f90: ft8_a7_save and the message list of ft8_a7d).
-/** Maximum number of decodes saved per slot (MAXDEC). */
-const MAX_ENTRIES = 200;
-const SLOT_MS = 15_000;
 /** Number of candidate messages tried for each saved decode. */
 const NUM_MESSAGES = 206;
-/**
- * Decodes of recent FT8 slots, used for "a7" decoding: a station decoded 30 s
- * earlier is looked for again at the same frequency with the messages it is
- * likely to send next.
- *
- * Pass the same instance to consecutive `decodeFT8` calls together with
- * `slotStart`:
- * ```ts
- * const history = new FT8History();
- * const decoded = decodeFT8(samples, { depth: 3, history, slotStart: Date.now() });
- * ```
- */
-class FT8History {
-    /** Saved decodes keyed by slot number, floor(ms since epoch / 15000). */
-    slots = new Map();
-    /** Remove all saved decodes. */
-    clear() {
-        this.slots.clear();
-    }
-    /**
-     * Start a new tally for `slot`, replacing one saved by an earlier decode of
-     * the same slot, and return the tally of the previous slot of the same
-     * sequence (30 s earlier).
-     */
-    beginSlot(slot) {
-        for (const key of this.slots.keys()) {
-            if (key < slot - 2)
-                this.slots.delete(key);
-        }
-        this.slots.set(slot, []);
-        return this.slots.get(slot - 2) ?? [];
-    }
-    /** Save a decode of `slot` (ft8_a7_save). `dt` and `freq` are as reported to the user. */
-    save(slot, dt, freq, msg) {
-        if (msg.includes("/") || msg.includes("<"))
-            return;
-        const { words, lengths } = split77(msg);
-        if (words.length < 1 || words[0].startsWith("CQ_"))
-            return;
-        const tally = this.slots.get(slot);
-        if (!tally || tally.length >= MAX_ENTRIES)
-            return;
-        const [w1, w2 = "", w3 = ""] = words;
-        let entry = `${w1} ${w2}`.trim();
-        if (w1 === "CQ" && lengths[1] <= 2)
-            entry = `CQ ${w2} ${w3}`.trim();
-        const last = words[words.length - 1];
-        if (isGrid4(last.slice(0, 4)))
-            entry = `${entry} ${last}`;
-        tally.push({ dt, freq, msg: entry });
-    }
-    /**
-     * Whether a decode already saved for `slot` comes from the station of
-     * `entry` (saved for slot - 2), so that no a7 decode should be tried for it.
-     */
-    supersedes(slot, entry) {
-        for (const cur of this.slots.get(slot) ?? []) {
-            const call2 = split77(cur.msg).words[1] ?? "";
-            if (Math.abs(cur.freq - entry.freq) <= 3.0 && entry.msg.indexOf(` ${call2}`) >= 2) {
-                return true;
-            }
-        }
-        return false;
-    }
-}
-/** Slot number of a time within a 15 s FT8 slot. */
-function slotNumber(time) {
-    const ms = typeof time === "number" ? time : time.getTime();
-    return Math.floor(ms / SLOT_MS);
-}
 /**
  * The message candidates for an a7 decode of `entry` (ft8_a7d), with the
  * callsigns and grid they were built from. Messages that cannot be packed are
@@ -3906,7 +2849,7 @@ function a7Candidates(entry) {
         try {
             const bits77 = pack77(msg);
             const cw = encode174_91(bits77);
-            return { bits77, cw, tones: getTones$2(cw) };
+            return { bits77, cw, tones: getTones$1(cw) };
         }
         catch {
             return null;
@@ -3998,57 +2941,6 @@ function a7Messages(call1, call2, grid4) {
     }
     return msgs;
 }
-/**
- * Split a message into upper-case words, merging "CQ xxx" into "CQ_xxx" when
- * the third word is a callsign (split77 in packjt77.f90). `lengths` are the
- * word lengths before merging.
- */
-function split77(msg) {
-    const words = msg.toUpperCase().split(" ").filter(Boolean);
-    const lengths = words.map((w) => w.length);
-    if (words.length >= 3 && words[0] === "CQ" && chkcall(words[2])) {
-        words.splice(0, 2, `CQ_${words[1].slice(0, 10)}`);
-    }
-    return { words, lengths };
-}
-/** Whether `w` could be a standard or compound callsign (chkcall.f90). */
-function chkcall(w) {
-    const n1 = w.length;
-    if (n1 > 11 || /[.+\-?]/.test(w))
-        return false;
-    const i0 = w.indexOf("/");
-    if (n1 > 6 && i0 < 0)
-        return false;
-    // Base call of a compound call: the longer part
-    if (Math.max(i0, n1 - i0 - 1) > 6)
-        return false;
-    let bc = w.slice(0, 6);
-    if (i0 >= 1 && i0 <= n1 - 2)
-        bc = i0 <= n1 - i0 - 1 ? w.slice(i0 + 1) : w.slice(0, i0);
-    const nbc = bc.length;
-    if (nbc > 6)
-        return false;
-    if (!isLetter(bc[0] ?? "") && !isLetter(bc[1] ?? ""))
-        return false;
-    if (bc[0] === "Q" && !bc.startsWith("QU1RK"))
-        return false;
-    // Call area digit in the second or third position, followed by 1-3 letters
-    let i1 = -1;
-    if (isDigit(bc[1] ?? ""))
-        i1 = 1;
-    if (isDigit(bc[2] ?? ""))
-        i1 = 2;
-    if (i1 < 0 || i1 === nbc - 1)
-        return false;
-    for (let i = i1 + 1; i < nbc; i++) {
-        if (!isLetter(bc[i]))
-            return false;
-    }
-    return nbc - i1 - 1 <= 3;
-}
-function isGrid4(g) {
-    return /^[A-R]{2}[0-9]{2}$/.test(g);
-}
 function isDigit(c) {
     return c >= "0" && c <= "9";
 }
@@ -4134,91 +3026,6 @@ const BASELINE_WINDOW = buildBaselineWindow();
 const GFSK_PULSE = buildGfskPulse(2.0);
 const LPF = buildSubtractionFilter();
 /**
- * Decode all FT8 signals in an audio buffer.
- * Input: mono audio samples at `sampleRate` Hz, duration ~15s.
- */
-function decode(samples, options = {}) {
-    const { nfa, nfb, npass, params } = resolveDecodeSettings(options);
-    const history = options.history;
-    const slot = historySlot(options);
-    const previous = history?.beginSlot(slot) ?? [];
-    const dd = prepareSamples(samples, options.sampleRate ?? SAMPLE_RATE);
-    const workspace = createDecodeWorkspace();
-    const collector = new DecodeCollector(history, slot);
-    let sbase = new Float64Array(NH1 + 1);
-    for (let ipass = 1; ipass <= npass; ipass++) {
-        if (ipass === 3 && collector.decoded.length === 0)
-            break;
-        const pass = runPass(dd, nfa, nfb, ipass, params, workspace);
-        sbase = pass.sbase;
-        for (const d of pass.decodes)
-            collector.add(toDecodedMessage(d));
-    }
-    // a7: stations decoded 30 s earlier, looked for in the residual signal.
-    if (history && params.depth >= 3 && previous.length > 0) {
-        computeLongSpectrum(dd, workspace);
-        for (const entry of previous) {
-            if (history.supersedes(slot, entry))
-                continue;
-            const result = runA7Entry(entry, sbase, workspace);
-            if (result)
-                collector.add(result);
-        }
-    }
-    return collector.decoded;
-}
-/** Resolves the options into the band, number of passes and pass settings. */
-function resolveDecodeSettings(options) {
-    const nfa = options.freqLow ?? 200;
-    const nfb = options.freqHigh ?? 3000;
-    // Depths above 3 are accepted and behave like 3.
-    const depth = Math.min(options.depth ?? 2, 3);
-    const params = {
-        depth,
-        syncmin: options.syncMin ?? (depth <= 2 ? 2.1 : 1.3),
-        maxCandidates: options.maxCandidates ?? 1000,
-        contest: options.contest,
-        book: options.hashCallBook,
-    };
-    return { nfa, nfb, npass: depth <= 1 ? 2 : 3, params };
-}
-/** Slot number of the decode, checking that `slotStart` comes with `history`. */
-function historySlot(options) {
-    if (options.history && options.slotStart === undefined) {
-        throw new TypeError("decodeFT8: `slotStart` is required when `history` is given");
-    }
-    return options.slotStart === undefined ? 0 : slotNumber(options.slotStart);
-}
-/** The 15 s decode window at 12 kHz. */
-function prepareSamples(samples, sampleRate) {
-    return sampleRate === SAMPLE_RATE
-        ? copySamplesToDecodeWindow(samples)
-        : resample(samples, sampleRate, SAMPLE_RATE, NMAX);
-}
-/** Collects decodes, dropping repeated messages, and saves them for a7. */
-class DecodeCollector {
-    history;
-    slot;
-    decoded = [];
-    seenMessages = new Set();
-    constructor(history, slot) {
-        this.history = history;
-        this.slot = slot;
-    }
-    add(d) {
-        const messageKey = normalizeMessageKey(d.msg);
-        if (this.seenMessages.has(messageKey))
-            return;
-        this.seenMessages.add(messageKey);
-        this.decoded.push(d);
-        this.history?.save(this.slot, d.dt, d.freq, d.msg);
-    }
-}
-function toDecodedMessage(d) {
-    const { tones: _tones, dtSubtract: _dtSubtract, ...message } = d;
-    return message;
-}
-/**
  * One decoding pass over [nfa, nfb] Hz: find candidates, decode them and
  * subtract each decoded signal from `dd`. Returns the decodes in order,
  * including repeated messages, and the spectrum baseline.
@@ -4260,14 +3067,10 @@ function runPass(dd, nfa, nfb, ipass, params, workspace) {
     }
     return { decodes, sbase };
 }
-/**
- * Whether a signal at `freq` Hz can affect decoding in [nfa, nfb] Hz: whether
- * it lies within reach of the spectra that sync8 and ft8b read for candidates
- * in the band, with one tone spacing to spare.
- */
-function affectsBand(freq, nfa, nfb) {
-    const reach = SIGNAL_BAND_ABOVE + SEARCH_FREQ_HALF * SEARCH_FREQ_STEP + DOWNSAMPLE_BAUD;
-    return freq + SIGNAL_BAND_ABOVE > nfa - reach && freq - SIGNAL_BAND_BELOW < nfb + reach;
+/** Subtracts signals decoded elsewhere (by another thread) from `dd`. */
+function subtractDecodes(dd, decodes, workspace) {
+    for (const d of decodes)
+        subtractft8(dd, d.tones, d.freq, d.dtSubtract, workspace);
 }
 /**
  * a7 decode of one entry saved 30 s earlier. The spectrum of the residual
@@ -4278,9 +3081,6 @@ function runA7Entry(entry, sbase, workspace) {
     const xbase = 10.0 ** (0.1 * (sbase[ibin] - 40.0));
     const result = ft8a7d(entry, xbase, workspace);
     return result ? { ...result, sync: 0, ap: 7 } : null;
-}
-function normalizeMessageKey(msg) {
-    return msg.trim().replace(/\s+/g, " ").toUpperCase();
 }
 /** Whether the band ft8b would use for a candidate at `freq` overlaps any of `bands`. */
 function overlapsBands(freq, bands) {
@@ -4328,13 +3128,6 @@ function createDecodeWorkspace() {
         cfiltIm: new Float64Array(SUBTRACT_NBLOCKS + 1),
         dphi: new Float64Array((NN + 2) * NSPS),
     };
-}
-function copySamplesToDecodeWindow(samples) {
-    const out = new Float64Array(NMAX);
-    const len = Math.min(samples.length, NMAX);
-    for (let i = 0; i < len; i++)
-        out[i] = samples[i];
-    return out;
 }
 function computeLongSpectrum(dd, workspace) {
     const { cxRe, cxIm } = workspace;
@@ -5392,284 +4185,75 @@ function buildSubtractionFilter() {
     }
     return { cosTab, sinTab, sumw, massStart };
 }
-function resample(input, fromRate, toRate, outLen) {
-    const out = new Float64Array(outLen);
-    const ratio = fromRate / toRate;
-    for (let i = 0; i < outLen; i++) {
-        const srcIdx = i * ratio;
-        const lo = Math.floor(srcIdx);
-        const frac = srcIdx - lo;
-        const v0 = lo < input.length ? (input[lo] ?? 0) : 0;
-        const v1 = lo + 1 < input.length ? (input[lo + 1] ?? 0) : 0;
-        out[i] = v0 * (1 - frac) + v1 * frac;
-    }
-    return out;
-}
 
-// Kept out of sight of bundlers, which would otherwise try to resolve it when
-// bundling for the browser.
-const WORKER_THREADS = "node:worker_threads";
-function isNode() {
-    return typeof process !== "undefined" && typeof process.versions?.node === "string";
-}
-/** Number of logical cores, or 1 if unknown. */
-function coreCount() {
-    const cores = typeof navigator === "undefined" ? undefined : navigator.hardwareConcurrency;
-    if (cores)
-        return cores;
-    if (isNode()) {
-        const os = process.getBuiltinModule?.("node:os");
-        if (os)
-            return os.availableParallelism();
+/** A hash call book that records the callsigns saved into it. */
+class RecordingHashCallBook extends HashCallBook {
+    saved = [];
+    save(callsign) {
+        this.saved.push(callsign);
+        super.save(callsign);
     }
-    return 1;
-}
-function defaultWorker() {
-    if (typeof Worker !== "undefined") {
-        return new Worker(new URL("./ft8ts-worker.mjs", (typeof document === 'undefined' ? require('u' + 'rl').pathToFileURL(__filename).href : (_documentCurrentScript && _documentCurrentScript.tagName.toUpperCase() === 'SCRIPT' && _documentCurrentScript.src || new URL('ft8ts.cjs', document.baseURI).href))), { type: "module" });
+    /** Save callsigns of other workers without recording them. */
+    saveUnrecorded(calls) {
+        for (const call of calls)
+            super.save(call);
     }
-    return nodeDecoderWorker(new URL("./ft8ts-worker-node.mjs", (typeof document === 'undefined' ? require('u' + 'rl').pathToFileURL(__filename).href : (_documentCurrentScript && _documentCurrentScript.tagName.toUpperCase() === 'SCRIPT' && _documentCurrentScript.src || new URL('ft8ts.cjs', document.baseURI).href))));
 }
-/**
- * Starts the Node.js worker script at `url` (such as `dist/ft8ts-worker-node.mjs`)
- * in a worker thread, as a `DecoderWorker`. The thread does not keep the
- * process alive while it is idle.
- */
-async function nodeDecoderWorker(url, options = {}) {
-    const { Worker: NodeWorker } = await import(
-    /* webpackIgnore: true */ /* @vite-ignore */ WORKER_THREADS);
-    const thread = new NodeWorker(url, options.execArgv ? { execArgv: options.execArgv } : {});
-    thread.unref();
-    let outstanding = 0;
-    let terminated = false;
-    const worker = {
-        onmessage: null,
-        onerror: null,
-        postMessage(message, transfer) {
-            // Keep the process alive until the answer arrives.
-            if (outstanding++ === 0)
-                thread.ref();
-            thread.postMessage(message, transfer);
-        },
-        terminate() {
-            terminated = true;
-            void thread.terminate();
-        },
-    };
-    thread.on("message", (data) => {
-        if (--outstanding === 0)
-            thread.unref();
-        worker.onmessage?.({ data });
-    });
-    thread.on("error", (error) => worker.onerror?.(error));
-    thread.on("exit", (code) => {
-        if (!terminated)
-            worker.onerror?.({ message: `decoder worker exited with code ${code}` });
-    });
-    return worker;
-}
-/** Narrowest sub-band (Hz) given to a thread; narrower bands use fewer threads. */
-const MIN_BAND_WIDTH = 100;
-/** Number of decoding threads for `cores` logical cores, as WSJT-X 3 chooses it. */
-function defaultThreadCount(cores) {
-    if (cores <= 1)
-        return 1;
-    if (cores <= 4)
-        return cores - 1;
-    if (cores <= 8)
-        return cores - 2;
-    if (cores <= 15)
-        return cores - 3;
-    return 12;
-}
-/**
- * Decodes FT8 in several threads at once: Web Workers in browsers,
- * worker_threads in Node.js. Create one pool and use it for
- * every slot; the workers are started on first use and kept until
- * `terminate()`.
- *
- * ```ts
- * const pool = new FT8DecoderPool();
- * const decoded = await pool.decode(samples, { sampleRate: 48000, depth: 3 });
- * ```
- *
- * Results are those of `decodeFT8` with the same options, up to small
- * differences: as in WSJT-X, each thread finds candidates in its own
- * sub-band, and sees the signals decoded by the other threads only from the
- * next pass on.
- */
-class FT8DecoderPool {
-    threads;
-    workerFactory;
-    customFactory;
-    workers = [];
-    queue = Promise.resolve();
-    constructor(options = {}) {
-        this.threads = Math.max(1, Math.floor(options.threads ?? defaultThreadCount(coreCount())));
-        this.customFactory = options.workerFactory !== undefined;
-        this.workerFactory = options.workerFactory ?? defaultWorker;
-    }
-    /**
-     * Decode all FT8 signals in an audio buffer, like `decodeFT8`. Calls are
-     * run one after another. With one thread, or without any kind of worker, the
-     * buffer is decoded on the calling thread.
-     */
-    decode(samples, options = {}) {
-        const run = this.queue.then(() => this.run(samples, options));
-        this.queue = run.catch(() => { });
-        return run;
-    }
-    /** Stop the workers. The pool starts new ones if it is used again. */
-    terminate() {
-        for (const w of this.workers)
-            w.terminate();
-        this.workers.length = 0;
-    }
-    async run(samples, options) {
-        const { nfa, nfb, npass, params } = resolveDecodeSettings(options);
-        const nthreads = Math.min(this.threads, Math.floor((nfb - nfa) / MIN_BAND_WIDTH));
-        if (nthreads <= 1 || !this.canStartWorkers())
-            return decode(samples, options);
-        const history = options.history;
-        const slot = historySlot(options);
-        const previous = history?.beginSlot(slot) ?? [];
-        const dd = prepareSamples(samples, options.sampleRate ?? SAMPLE_RATE);
-        const bands = splitBand(nfa, nfb, nthreads);
-        const started = await Promise.all(Array.from({ length: nthreads - this.workers.length }, () => this.workerFactory()));
-        for (const w of started)
-            this.workers.push(new WorkerChannel(w));
-        const workers = this.workers.slice(0, nthreads);
-        const book = params.book;
-        const snapshot = book?.snapshot() ?? null;
-        await Promise.all(workers.map((w, i) => {
-            const copy = dd.slice();
-            return w.request({
-                type: "init",
-                dd: copy,
-                nfa: bands[i][0],
-                nfb: bands[i][1],
-                depth: params.depth,
-                syncmin: params.syncmin,
-                maxCandidates: params.maxCandidates,
-                contest: params.contest,
-                book: snapshot,
-            }, [copy.buffer]);
-        }));
-        const collector = new DecodeCollector(history, slot);
-        // Signals near its sub-band and callsigns that each worker has yet to hear
-        // about from the others.
-        let subtract = workers.map(() => []);
-        let calls = workers.map(() => []);
-        for (let ipass = 1; ipass <= npass; ipass++) {
-            if (ipass === 3 && collector.decoded.length === 0)
-                break;
-            const responses = await Promise.all(workers.map((w, i) => w.request({ type: "pass", ipass, subtract: subtract[i], calls: calls[i] })));
-            subtract = workers.map(() => []);
-            calls = workers.map(() => []);
-            responses.forEach((r, i) => {
-                if (r.type !== "pass")
-                    return;
-                for (const d of r.decodes)
-                    collector.add(toDecodedMessage(d));
-                for (const call of r.calls)
-                    book?.save(call);
-                for (let j = 0; j < workers.length; j++) {
-                    if (j === i)
-                        continue;
-                    const [lo, hi] = bands[j];
-                    subtract[j].push(...r.decodes.filter((d) => affectsBand(d.freq, lo, hi)));
-                    calls[j].push(...r.calls);
+/** Returns a function handling the requests of one worker, in order. */
+function createWorkerHandler() {
+    let workspace;
+    let state;
+    return (request) => {
+        try {
+            if (request.type === "init") {
+                workspace ??= createDecodeWorkspace();
+                let book;
+                if (request.book) {
+                    book = new RecordingHashCallBook();
+                    book.restore(request.book);
                 }
-            });
+                state = {
+                    dd: request.dd,
+                    nfa: request.nfa,
+                    nfb: request.nfb,
+                    params: {
+                        depth: request.depth,
+                        syncmin: request.syncmin,
+                        maxCandidates: request.maxCandidates,
+                        contest: request.contest,
+                        book,
+                    },
+                    book,
+                    sbase: new Float64Array(0),
+                };
+                return { type: "init" };
+            }
+            if (!state || !workspace)
+                throw new Error("decoder worker used before init");
+            subtractDecodes(state.dd, request.subtract, workspace);
+            if (request.type === "pass") {
+                const { book } = state;
+                book?.saveUnrecorded(request.calls);
+                if (book)
+                    book.saved = [];
+                const pass = runPass(state.dd, state.nfa, state.nfb, request.ipass, state.params, workspace);
+                state.sbase = pass.sbase;
+                return { type: "pass", decodes: pass.decodes, calls: book?.saved ?? [] };
+            }
+            computeLongSpectrum(state.dd, workspace);
+            const ws = workspace;
+            const { sbase } = state;
+            return { type: "a7", results: request.entries.map((e) => runA7Entry(e, sbase, ws)) };
         }
-        // a7: each station decoded 30 s earlier is looked for by the worker of
-        // its frequency. Supersession is checked again in order, as a7 decodes
-        // saved into the history can supersede later entries.
-        if (history && params.depth >= 3 && previous.length > 0) {
-            const entries = previous.filter((e) => !history.supersedes(slot, e));
-            const byWorker = workers.map(() => []);
-            const owner = entries.map((e) => bandIndex(bands, e.freq));
-            entries.forEach((e, k) => {
-                byWorker[owner[k]].push(e);
-            });
-            const responses = await Promise.all(workers.map((w, i) => w.request({ type: "a7", subtract: subtract[i], entries: byWorker[i] })));
-            const next = workers.map(() => 0);
-            entries.forEach((entry, k) => {
-                const i = owner[k];
-                const r = responses[i];
-                const result = r.type === "a7" ? r.results[next[i]++] : null;
-                if (!result || history.supersedes(slot, entry))
-                    return;
-                collector.add(result);
-            });
+        catch (err) {
+            return { type: "error", message: err instanceof Error ? err.message : String(err) };
         }
-        return collector.decoded;
-    }
-    canStartWorkers() {
-        return this.customFactory || typeof Worker !== "undefined" || isNode();
-    }
-}
-/**
- * Split [nfa, nfb] Hz into `n` sub-bands as decoder.f90 does: widths of
- * round((nfb - nfa) / n), each starting 1 Hz above the end of the previous one.
- */
-function splitBand(nfa, nfb, n) {
-    const nfdelta = Math.round(Math.abs(nfb - nfa) / n);
-    const bands = [];
-    let lo = nfa;
-    for (let i = 0; i < n; i++) {
-        const hi = i === n - 1 ? nfb : Math.min(nfa + (i + 1) * nfdelta, nfb - 1);
-        bands.push([lo, hi]);
-        lo = hi + 1;
-    }
-    return bands;
-}
-/** Index of the sub-band containing `freq`, or of the nearest one. */
-function bandIndex(bands, freq) {
-    for (let i = 0; i < bands.length - 1; i++)
-        if (freq <= bands[i][1])
-            return i;
-    return bands.length - 1;
-}
-/** Requests to one worker, answered in order. */
-class WorkerChannel {
-    worker;
-    pending = [];
-    constructor(worker) {
-        this.worker = worker;
-        worker.onmessage = (event) => {
-            this.pending.shift()?.resolve(event.data);
-        };
-        worker.onerror = (event) => {
-            const message = typeof event === "object" && event !== null && "message" in event
-                ? String(event.message)
-                : "decoder worker failed";
-            for (const p of this.pending.splice(0))
-                p.reject(new Error(message));
-        };
-    }
-    request(message, transfer = []) {
-        return new Promise((resolve, reject) => {
-            this.pending.push({
-                resolve: (r) => (r.type === "error" ? reject(new Error(r.message)) : resolve(r)),
-                reject,
-            });
-            this.worker.postMessage(message, transfer);
-        });
-    }
-    terminate() {
-        this.worker.terminate();
-        for (const p of this.pending.splice(0))
-            p.reject(new Error("decoder pool terminated"));
-    }
+    };
 }
 
-exports.FT8DecoderPool = FT8DecoderPool;
-exports.FT8History = FT8History;
-exports.HashCallBook = HashCallBook;
-exports.decodeFT4 = decode$1;
-exports.decodeFT8 = decode;
-exports.defaultThreadCount = defaultThreadCount;
-exports.encodeFT4 = encode;
-exports.encodeFT8 = encode$1;
-//# sourceMappingURL=ft8ts.cjs.map
+const scope = globalThis;
+const handle = createWorkerHandler();
+scope.onmessage = (event) => {
+    scope.postMessage(handle(event.data));
+};
+//# sourceMappingURL=ft8ts-worker.mjs.map

@@ -12,4 +12,10 @@ export {
 	type FT8Contest,
 } from "./ft8/decode.js";
 export { encode as encodeFT8 } from "./ft8/encode.js";
-export { HashCallBook } from "./util/hashcall.js";
+export {
+	type DecoderWorker,
+	defaultThreadCount,
+	FT8DecoderPool,
+	type FT8DecoderPoolOptions,
+} from "./parallel.js";
+export { HashCallBook, type HashCallBookSnapshot } from "./util/hashcall.js";

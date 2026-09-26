@@ -3782,6 +3782,24 @@ class HashCallBook {
     get size() {
         return this.hash22Entries.length;
     }
+    /** The contents of the book, to be restored with `restore`. */
+    snapshot() {
+        return {
+            calls10: [...this.calls10],
+            calls12: [...this.calls12],
+            hash22: this.hash22Entries.map((e) => ({ ...e })),
+        };
+    }
+    /** Replace the contents of the book with a `snapshot`. */
+    restore(snapshot) {
+        this.clear();
+        for (const [hash, call] of snapshot.calls10)
+            this.calls10.set(hash, call);
+        for (const [hash, call] of snapshot.calls12)
+            this.calls12.set(hash, call);
+        for (const e of snapshot.hash22)
+            this.hash22Entries.push({ ...e });
+    }
     /** Remove all stored entries. */
     clear() {
         this.calls10.clear();
@@ -4117,89 +4135,146 @@ const LPF = buildSubtractionFilter();
  * Input: mono audio samples at `sampleRate` Hz, duration ~15s.
  */
 function decode(samples, options = {}) {
-    const sampleRate = options.sampleRate ?? SAMPLE_RATE;
-    const nfa = options.freqLow ?? 200;
-    const nfb = options.freqHigh ?? 3000;
-    // Depths above 3 are accepted and behave like 3.
-    const depth = Math.min(options.depth ?? 2, 3);
-    const syncmin = options.syncMin ?? (depth <= 2 ? 2.1 : 1.3);
-    const maxCandidates = options.maxCandidates ?? 1000;
-    const book = options.hashCallBook;
-    const contest = options.contest;
+    const { nfa, nfb, npass, params } = resolveDecodeSettings(options);
     const history = options.history;
-    if (history && options.slotStart === undefined) {
-        throw new TypeError("decodeFT8: `slotStart` is required when `history` is given");
-    }
-    const slot = options.slotStart === undefined ? 0 : slotNumber(options.slotStart);
+    const slot = historySlot(options);
     const previous = history?.beginSlot(slot) ?? [];
-    const dd = sampleRate === SAMPLE_RATE
-        ? copySamplesToDecodeWindow(samples)
-        : resample(samples, sampleRate, SAMPLE_RATE, NMAX);
+    const dd = prepareSamples(samples, options.sampleRate ?? SAMPLE_RATE);
     const workspace = createDecodeWorkspace();
-    const decoded = [];
-    const seenMessages = new Set();
-    /** Adds a decode unless its message was already decoded, and saves it for a7. */
-    const addDecode = (d) => {
-        const messageKey = normalizeMessageKey(d.msg);
-        if (seenMessages.has(messageKey))
-            return;
-        seenMessages.add(messageKey);
-        decoded.push(d);
-        history?.save(slot, d.dt, d.freq, d.msg);
-    };
+    const collector = new DecodeCollector(history, slot);
     let sbase = new Float64Array(NH1 + 1);
-    const npass = depth <= 1 ? 2 : 3;
     for (let ipass = 1; ipass <= npass; ipass++) {
-        // Pass 1 uses amplitude bit metrics, later passes power metrics.
-        const imetric = ipass === 1 ? 1 : 2;
-        if (ipass === 3 && decoded.length === 0)
+        if (ipass === 3 && collector.decoded.length === 0)
             break;
-        const sync = sync8(dd, nfa, nfb, syncmin, maxCandidates);
-        const candidates = sync.candidates;
-        sbase = sync.sbase;
-        computeLongSpectrum(dd, workspace);
-        // Bands [lo, hi] (Hz) of signals subtracted since the spectrum was computed.
-        const staleBands = [];
-        for (const cand of candidates) {
-            // WSJT-X keeps using the spectrum computed at the start of the pass. A
-            // candidate overlapping a just-subtracted signal would then re-decode
-            // that signal (and subtract it a second time with worse parameters),
-            // so refresh the spectrum first.
-            if (overlapsBands(cand.freq, staleBands)) {
-                computeLongSpectrum(dd, workspace);
-                staleBands.length = 0;
-            }
-            const ibin = Math.max(1, Math.round(cand.freq / SYNC_DF));
-            const xbase = 10.0 ** (0.1 * (sbase[ibin] - 40.0));
-            const result = ft8b(cand.freq, cand.dt, xbase, depth, imetric, contest, book, workspace);
-            if (!result)
-                continue;
-            subtractft8(dd, result.tones, result.freq, result.dtSubtract, workspace);
-            staleBands.push(result.freq - SIGNAL_BAND_BELOW, result.freq + SIGNAL_BAND_ABOVE);
-            addDecode({
-                freq: result.freq,
-                dt: result.dt - 0.5,
-                snr: result.snr,
-                msg: result.msg,
-                sync: cand.sync,
-                ...(result.ap ? { ap: result.ap } : {}),
-            });
-        }
+        const pass = runPass(dd, nfa, nfb, ipass, params, workspace);
+        sbase = pass.sbase;
+        for (const d of pass.decodes)
+            collector.add(toDecodedMessage(d));
     }
     // a7: stations decoded 30 s earlier, looked for in the residual signal.
-    if (history && depth >= 3 && previous.length > 0) {
+    if (history && params.depth >= 3 && previous.length > 0) {
         computeLongSpectrum(dd, workspace);
         for (const entry of previous) {
             if (history.supersedes(slot, entry))
                 continue;
-            const ibin = Math.max(1, Math.round(entry.freq / SYNC_DF));
-            const xbase = 10.0 ** (0.1 * (sbase[ibin] - 40.0));
-            const result = ft8a7d(entry, xbase, workspace);
+            const result = runA7Entry(entry, sbase, workspace);
             if (result)
-                addDecode({ ...result, sync: 0, ap: 7 });
+                collector.add(result);
         }
     }
-    return decoded;
+    return collector.decoded;
+}
+/** Resolves the options into the band, number of passes and pass settings. */
+function resolveDecodeSettings(options) {
+    const nfa = options.freqLow ?? 200;
+    const nfb = options.freqHigh ?? 3000;
+    // Depths above 3 are accepted and behave like 3.
+    const depth = Math.min(options.depth ?? 2, 3);
+    const params = {
+        depth,
+        syncmin: options.syncMin ?? (depth <= 2 ? 2.1 : 1.3),
+        maxCandidates: options.maxCandidates ?? 1000,
+        contest: options.contest,
+        book: options.hashCallBook,
+    };
+    return { nfa, nfb, npass: depth <= 1 ? 2 : 3, params };
+}
+/** Slot number of the decode, checking that `slotStart` comes with `history`. */
+function historySlot(options) {
+    if (options.history && options.slotStart === undefined) {
+        throw new TypeError("decodeFT8: `slotStart` is required when `history` is given");
+    }
+    return options.slotStart === undefined ? 0 : slotNumber(options.slotStart);
+}
+/** The 15 s decode window at 12 kHz. */
+function prepareSamples(samples, sampleRate) {
+    return sampleRate === SAMPLE_RATE
+        ? copySamplesToDecodeWindow(samples)
+        : resample(samples, sampleRate, SAMPLE_RATE, NMAX);
+}
+/** Collects decodes, dropping repeated messages, and saves them for a7. */
+class DecodeCollector {
+    history;
+    slot;
+    decoded = [];
+    seenMessages = new Set();
+    constructor(history, slot) {
+        this.history = history;
+        this.slot = slot;
+    }
+    add(d) {
+        const messageKey = normalizeMessageKey(d.msg);
+        if (this.seenMessages.has(messageKey))
+            return;
+        this.seenMessages.add(messageKey);
+        this.decoded.push(d);
+        this.history?.save(this.slot, d.dt, d.freq, d.msg);
+    }
+}
+function toDecodedMessage(d) {
+    const { tones: _tones, dtSubtract: _dtSubtract, ...message } = d;
+    return message;
+}
+/**
+ * One decoding pass over [nfa, nfb] Hz: find candidates, decode them and
+ * subtract each decoded signal from `dd`. Returns the decodes in order,
+ * including repeated messages, and the spectrum baseline.
+ */
+function runPass(dd, nfa, nfb, ipass, params, workspace) {
+    // Pass 1 uses amplitude bit metrics, later passes power metrics.
+    const imetric = ipass === 1 ? 1 : 2;
+    const { candidates, sbase } = sync8(dd, nfa, nfb, params.syncmin, params.maxCandidates);
+    computeLongSpectrum(dd, workspace);
+    // Bands [lo, hi] (Hz) of signals subtracted since the spectrum was computed.
+    const staleBands = [];
+    const decodes = [];
+    for (const cand of candidates) {
+        // WSJT-X keeps using the spectrum computed at the start of the pass. A
+        // candidate overlapping a just-subtracted signal would then re-decode
+        // that signal (and subtract it a second time with worse parameters),
+        // so refresh the spectrum first.
+        if (overlapsBands(cand.freq, staleBands)) {
+            computeLongSpectrum(dd, workspace);
+            staleBands.length = 0;
+        }
+        const ibin = Math.max(1, Math.round(cand.freq / SYNC_DF));
+        const xbase = 10.0 ** (0.1 * (sbase[ibin] - 40.0));
+        const result = ft8b(cand.freq, cand.dt, xbase, params.depth, imetric, params.contest, params.book, workspace);
+        if (!result)
+            continue;
+        subtractft8(dd, result.tones, result.freq, result.dtSubtract, workspace);
+        staleBands.push(result.freq - SIGNAL_BAND_BELOW, result.freq + SIGNAL_BAND_ABOVE);
+        decodes.push({
+            freq: result.freq,
+            dt: result.dt - 0.5,
+            snr: result.snr,
+            msg: result.msg,
+            sync: cand.sync,
+            ...(result.ap ? { ap: result.ap } : {}),
+            tones: result.tones,
+            dtSubtract: result.dtSubtract,
+        });
+    }
+    return { decodes, sbase };
+}
+/**
+ * Whether a signal at `freq` Hz can affect decoding in [nfa, nfb] Hz: whether
+ * it lies within reach of the spectra that sync8 and ft8b read for candidates
+ * in the band, with one tone spacing to spare.
+ */
+function affectsBand(freq, nfa, nfb) {
+    const reach = SIGNAL_BAND_ABOVE + SEARCH_FREQ_HALF * SEARCH_FREQ_STEP + DOWNSAMPLE_BAUD;
+    return freq + SIGNAL_BAND_ABOVE > nfa - reach && freq - SIGNAL_BAND_BELOW < nfb + reach;
+}
+/**
+ * a7 decode of one entry saved 30 s earlier. The spectrum of the residual
+ * signal must have been computed into the workspace (`computeLongSpectrum`).
+ */
+function runA7Entry(entry, sbase, workspace) {
+    const ibin = Math.max(1, Math.round(entry.freq / SYNC_DF));
+    const xbase = 10.0 ** (0.1 * (sbase[ibin] - 40.0));
+    const result = ft8a7d(entry, xbase, workspace);
+    return result ? { ...result, sync: 0, ap: 7 } : null;
 }
 function normalizeMessageKey(msg) {
     return msg.trim().replace(/\s+/g, " ").toUpperCase();
@@ -5328,5 +5403,263 @@ function resample(input, fromRate, toRate, outLen) {
     return out;
 }
 
-export { FT8History, HashCallBook, decode$1 as decodeFT4, decode as decodeFT8, encode as encodeFT4, encode$1 as encodeFT8 };
+// Kept out of sight of bundlers, which would otherwise try to resolve it when
+// bundling for the browser.
+const WORKER_THREADS = "node:worker_threads";
+function isNode() {
+    return typeof process !== "undefined" && typeof process.versions?.node === "string";
+}
+/** Number of logical cores, or 1 if unknown. */
+function coreCount() {
+    const cores = typeof navigator === "undefined" ? undefined : navigator.hardwareConcurrency;
+    if (cores)
+        return cores;
+    if (isNode()) {
+        const os = process.getBuiltinModule?.("node:os");
+        if (os)
+            return os.availableParallelism();
+    }
+    return 1;
+}
+function defaultWorker() {
+    if (typeof Worker !== "undefined") {
+        return new Worker(new URL("./ft8ts-worker.mjs", import.meta.url), { type: "module" });
+    }
+    return nodeDecoderWorker(new URL("./ft8ts-worker-node.mjs", import.meta.url));
+}
+/**
+ * Starts the Node.js worker script at `url` (such as `dist/ft8ts-worker-node.mjs`)
+ * in a worker thread, as a `DecoderWorker`. The thread does not keep the
+ * process alive while it is idle.
+ */
+async function nodeDecoderWorker(url, options = {}) {
+    const { Worker: NodeWorker } = await import(
+    /* webpackIgnore: true */ /* @vite-ignore */ WORKER_THREADS);
+    const thread = new NodeWorker(url, options.execArgv ? { execArgv: options.execArgv } : {});
+    thread.unref();
+    let outstanding = 0;
+    let terminated = false;
+    const worker = {
+        onmessage: null,
+        onerror: null,
+        postMessage(message, transfer) {
+            // Keep the process alive until the answer arrives.
+            if (outstanding++ === 0)
+                thread.ref();
+            thread.postMessage(message, transfer);
+        },
+        terminate() {
+            terminated = true;
+            void thread.terminate();
+        },
+    };
+    thread.on("message", (data) => {
+        if (--outstanding === 0)
+            thread.unref();
+        worker.onmessage?.({ data });
+    });
+    thread.on("error", (error) => worker.onerror?.(error));
+    thread.on("exit", (code) => {
+        if (!terminated)
+            worker.onerror?.({ message: `decoder worker exited with code ${code}` });
+    });
+    return worker;
+}
+/** Narrowest sub-band (Hz) given to a thread; narrower bands use fewer threads. */
+const MIN_BAND_WIDTH = 100;
+/** Number of decoding threads for `cores` logical cores, as WSJT-X 3 chooses it. */
+function defaultThreadCount(cores) {
+    if (cores <= 1)
+        return 1;
+    if (cores <= 4)
+        return cores - 1;
+    if (cores <= 8)
+        return cores - 2;
+    if (cores <= 15)
+        return cores - 3;
+    return 12;
+}
+/**
+ * Decodes FT8 in several threads at once: Web Workers in browsers,
+ * worker_threads in Node.js. Create one pool and use it for
+ * every slot; the workers are started on first use and kept until
+ * `terminate()`.
+ *
+ * ```ts
+ * const pool = new FT8DecoderPool();
+ * const decoded = await pool.decode(samples, { sampleRate: 48000, depth: 3 });
+ * ```
+ *
+ * Results are those of `decodeFT8` with the same options, up to small
+ * differences: as in WSJT-X, each thread finds candidates in its own
+ * sub-band, and sees the signals decoded by the other threads only from the
+ * next pass on.
+ */
+class FT8DecoderPool {
+    threads;
+    workerFactory;
+    customFactory;
+    workers = [];
+    queue = Promise.resolve();
+    constructor(options = {}) {
+        this.threads = Math.max(1, Math.floor(options.threads ?? defaultThreadCount(coreCount())));
+        this.customFactory = options.workerFactory !== undefined;
+        this.workerFactory = options.workerFactory ?? defaultWorker;
+    }
+    /**
+     * Decode all FT8 signals in an audio buffer, like `decodeFT8`. Calls are
+     * run one after another. With one thread, or without any kind of worker, the
+     * buffer is decoded on the calling thread.
+     */
+    decode(samples, options = {}) {
+        const run = this.queue.then(() => this.run(samples, options));
+        this.queue = run.catch(() => { });
+        return run;
+    }
+    /** Stop the workers. The pool starts new ones if it is used again. */
+    terminate() {
+        for (const w of this.workers)
+            w.terminate();
+        this.workers.length = 0;
+    }
+    async run(samples, options) {
+        const { nfa, nfb, npass, params } = resolveDecodeSettings(options);
+        const nthreads = Math.min(this.threads, Math.floor((nfb - nfa) / MIN_BAND_WIDTH));
+        if (nthreads <= 1 || !this.canStartWorkers())
+            return decode(samples, options);
+        const history = options.history;
+        const slot = historySlot(options);
+        const previous = history?.beginSlot(slot) ?? [];
+        const dd = prepareSamples(samples, options.sampleRate ?? SAMPLE_RATE);
+        const bands = splitBand(nfa, nfb, nthreads);
+        const started = await Promise.all(Array.from({ length: nthreads - this.workers.length }, () => this.workerFactory()));
+        for (const w of started)
+            this.workers.push(new WorkerChannel(w));
+        const workers = this.workers.slice(0, nthreads);
+        const book = params.book;
+        const snapshot = book?.snapshot() ?? null;
+        await Promise.all(workers.map((w, i) => {
+            const copy = dd.slice();
+            return w.request({
+                type: "init",
+                dd: copy,
+                nfa: bands[i][0],
+                nfb: bands[i][1],
+                depth: params.depth,
+                syncmin: params.syncmin,
+                maxCandidates: params.maxCandidates,
+                contest: params.contest,
+                book: snapshot,
+            }, [copy.buffer]);
+        }));
+        const collector = new DecodeCollector(history, slot);
+        // Signals near its sub-band and callsigns that each worker has yet to hear
+        // about from the others.
+        let subtract = workers.map(() => []);
+        let calls = workers.map(() => []);
+        for (let ipass = 1; ipass <= npass; ipass++) {
+            if (ipass === 3 && collector.decoded.length === 0)
+                break;
+            const responses = await Promise.all(workers.map((w, i) => w.request({ type: "pass", ipass, subtract: subtract[i], calls: calls[i] })));
+            subtract = workers.map(() => []);
+            calls = workers.map(() => []);
+            responses.forEach((r, i) => {
+                if (r.type !== "pass")
+                    return;
+                for (const d of r.decodes)
+                    collector.add(toDecodedMessage(d));
+                for (const call of r.calls)
+                    book?.save(call);
+                for (let j = 0; j < workers.length; j++) {
+                    if (j === i)
+                        continue;
+                    const [lo, hi] = bands[j];
+                    subtract[j].push(...r.decodes.filter((d) => affectsBand(d.freq, lo, hi)));
+                    calls[j].push(...r.calls);
+                }
+            });
+        }
+        // a7: each station decoded 30 s earlier is looked for by the worker of
+        // its frequency. Supersession is checked again in order, as a7 decodes
+        // saved into the history can supersede later entries.
+        if (history && params.depth >= 3 && previous.length > 0) {
+            const entries = previous.filter((e) => !history.supersedes(slot, e));
+            const byWorker = workers.map(() => []);
+            const owner = entries.map((e) => bandIndex(bands, e.freq));
+            entries.forEach((e, k) => {
+                byWorker[owner[k]].push(e);
+            });
+            const responses = await Promise.all(workers.map((w, i) => w.request({ type: "a7", subtract: subtract[i], entries: byWorker[i] })));
+            const next = workers.map(() => 0);
+            entries.forEach((entry, k) => {
+                const i = owner[k];
+                const r = responses[i];
+                const result = r.type === "a7" ? r.results[next[i]++] : null;
+                if (!result || history.supersedes(slot, entry))
+                    return;
+                collector.add(result);
+            });
+        }
+        return collector.decoded;
+    }
+    canStartWorkers() {
+        return this.customFactory || typeof Worker !== "undefined" || isNode();
+    }
+}
+/**
+ * Split [nfa, nfb] Hz into `n` sub-bands as decoder.f90 does: widths of
+ * round((nfb - nfa) / n), each starting 1 Hz above the end of the previous one.
+ */
+function splitBand(nfa, nfb, n) {
+    const nfdelta = Math.round(Math.abs(nfb - nfa) / n);
+    const bands = [];
+    let lo = nfa;
+    for (let i = 0; i < n; i++) {
+        const hi = i === n - 1 ? nfb : Math.min(nfa + (i + 1) * nfdelta, nfb - 1);
+        bands.push([lo, hi]);
+        lo = hi + 1;
+    }
+    return bands;
+}
+/** Index of the sub-band containing `freq`, or of the nearest one. */
+function bandIndex(bands, freq) {
+    for (let i = 0; i < bands.length - 1; i++)
+        if (freq <= bands[i][1])
+            return i;
+    return bands.length - 1;
+}
+/** Requests to one worker, answered in order. */
+class WorkerChannel {
+    worker;
+    pending = [];
+    constructor(worker) {
+        this.worker = worker;
+        worker.onmessage = (event) => {
+            this.pending.shift()?.resolve(event.data);
+        };
+        worker.onerror = (event) => {
+            const message = typeof event === "object" && event !== null && "message" in event
+                ? String(event.message)
+                : "decoder worker failed";
+            for (const p of this.pending.splice(0))
+                p.reject(new Error(message));
+        };
+    }
+    request(message, transfer = []) {
+        return new Promise((resolve, reject) => {
+            this.pending.push({
+                resolve: (r) => (r.type === "error" ? reject(new Error(r.message)) : resolve(r)),
+                reject,
+            });
+            this.worker.postMessage(message, transfer);
+        });
+    }
+    terminate() {
+        this.worker.terminate();
+        for (const p of this.pending.splice(0))
+            p.reject(new Error("decoder pool terminated"));
+    }
+}
+
+export { FT8DecoderPool, FT8History, HashCallBook, decode$1 as decodeFT4, decode as decodeFT8, defaultThreadCount, encode as encodeFT4, encode$1 as encodeFT8 };
 //# sourceMappingURL=ft8ts.mjs.map

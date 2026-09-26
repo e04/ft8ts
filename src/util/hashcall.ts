@@ -24,6 +24,13 @@ function ihashcall(c0: string, m: number): number {
 	return Number(prod >> BigInt(64 - m)) & ((1 << m) - 1);
 }
 
+/** Contents of a `HashCallBook`, as plain data that can be sent to a worker. */
+export interface HashCallBookSnapshot {
+	calls10: [number, string][];
+	calls12: [number, string][];
+	hash22: { hash: number; call: string }[];
+}
+
 /**
  * Maintains a callsign ↔ hash lookup table for resolving hashed FT8 callsigns.
  *
@@ -99,6 +106,23 @@ export class HashCallBook {
 	/** Number of entries in the 22-bit hash table. */
 	get size(): number {
 		return this.hash22Entries.length;
+	}
+
+	/** The contents of the book, to be restored with `restore`. */
+	snapshot(): HashCallBookSnapshot {
+		return {
+			calls10: [...this.calls10],
+			calls12: [...this.calls12],
+			hash22: this.hash22Entries.map((e) => ({ ...e })),
+		};
+	}
+
+	/** Replace the contents of the book with a `snapshot`. */
+	restore(snapshot: HashCallBookSnapshot): void {
+		this.clear();
+		for (const [hash, call] of snapshot.calls10) this.calls10.set(hash, call);
+		for (const [hash, call] of snapshot.calls12) this.calls12.set(hash, call);
+		for (const e of snapshot.hash22) this.hash22Entries.push({ ...e });
 	}
 
 	/** Remove all stored entries. */

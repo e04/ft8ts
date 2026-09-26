@@ -20,7 +20,7 @@ https://e04.github.io/ft8ts/example/browser/index.html
 
 ```bash
 # Decode WAV file (FT8 or FT4)
-npx @e04/ft8ts decode foo.wav [--mode ft8|ft4] [--low 200] [--high 3000] [--depth 2] [--contest NA_VHF]
+npx @e04/ft8ts decode foo.wav [--mode ft8|ft4] [--low 200] [--high 3000] [--depth 2] [--contest NA_VHF] [--threads auto]
 
 # Encode message to WAV file
 npx @e04/ft8ts encode "CQ JK1IFA PM95" [--out output.wav] [--df 1000]
@@ -134,6 +134,29 @@ function onSlot(samples: Float32Array, slotStart: Date) {
 ```
 
 Like other a priori decodes, a7 decodes are more likely to be false than regular ones; they are marked with `ap`.
+
+### Multi-threaded FT8 decoding
+
+Like the FT8 decoding threads of WSJT-X 3, `FT8DecoderPool` splits the band into one sub-band per thread and decodes them in parallel in Web Workers (browsers) or worker threads (Node.js), which meet after every decoding pass to subtract each other's signals. It takes the same options as `decodeFT8` and returns a promise:
+
+```typescript
+import { FT8DecoderPool, FT8History, HashCallBook } from "@e04/ft8ts";
+
+const pool = new FT8DecoderPool(); // threads: as WSJT-X "auto", or { threads: 4 }
+const book = new HashCallBook();
+const history = new FT8History();
+
+async function onSlot(samples: Float32Array, slotStart: Date) {
+  return pool.decode(samples, { sampleRate: 48000, depth: 3, hashCallBook: book, history, slotStart });
+}
+```
+
+- In browsers, the workers run `dist/ft8ts-worker.mjs`, which the pool loads from next to `dist/ft8ts.mjs` with `new Worker(new URL("./ft8ts-worker.mjs", import.meta.url), { type: "module" })`. Bundlers that understand this pattern (Vite, webpack 5, ...) bundle the worker too; otherwise serve the file next to the module, or pass `workerFactory` to create the workers yourself.
+- In Node.js (ESM or CommonJS), the workers are `worker_threads` running `dist/ft8ts-worker-node.mjs`. Idle threads do not keep the process from exiting. If you bundle ft8ts into your own Node.js app, pass `workerFactory: () => nodeDecoderWorker(urlOfFt8tsWorkerNode)`.
+- Reuse one pool for all slots: the workers are started on first use and kept until `pool.terminate()`.
+- Results are those of `decodeFT8` up to small differences (SNRs by a fraction of a dB, rarely a decode near a sub-band edge), as each thread fits the spectrum baseline and finds candidates in its own sub-band.
+- With `threads: 1`, or where neither kind of worker is available, the pool decodes on the calling thread.
+- The CLI decodes FT8 in worker threads with `--threads <n|auto>`.
 
 ### Decode Options
 

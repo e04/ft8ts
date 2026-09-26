@@ -52,4 +52,24 @@ export default [
 		output: [{ file: "dist/ft8ts.d.ts" }],
 		plugins: [dts()],
 	},
+	// Worker scripts of FT8DecoderPool (browser and Node.js), which it loads
+	// from the same directory.
+	...[
+		["src/ft8/worker.ts", "dist/ft8ts-worker.mjs"],
+		["src/ft8/worker-node.ts", "dist/ft8ts-worker-node.mjs"],
+	].map(([input, file]) => ({
+		input,
+		output: { file, format: "es", sourcemap: true },
+		external: ["node:worker_threads"],
+		plugins: [
+			resolve(),
+			typescript({
+				tsconfig: "./tsconfig.json",
+				compilerOptions: {
+					declaration: false,
+					declarationMap: false,
+				},
+			}),
+		],
+	})),
 ];

@@ -4,6 +4,17 @@ import { pack77 } from "../src/util/pack_jt77.js";
 import { unpack77 } from "../src/util/unpack_jt77.js";
 
 describe("HashCallBook", () => {
+	test("restore reproduces a snapshot", () => {
+		const book = new HashCallBook();
+		for (const call of ["K1ABC", "PJ4/K1ABC", "YW18FIFA", "JA1ABC"]) book.save(call);
+		const copy = new HashCallBook();
+		copy.save("W9XYZ");
+		copy.restore(book.snapshot());
+		expect(copy.snapshot()).toEqual(book.snapshot());
+		expect(copy.size).toBe(4);
+		expect(unpack77(pack77("<PJ4/K1ABC> W9XYZ -10"), copy).msg).toBe("<PJ4/K1ABC> W9XYZ -10");
+	});
+
 	test("save populates all three hash tables", () => {
 		const book = new HashCallBook();
 		book.save("W9XYZ");

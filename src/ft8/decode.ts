@@ -200,7 +200,7 @@ interface SyncTemplate {
 	im: Float64Array;
 }
 
-interface DecodeWorkspace {
+export interface DecodeWorkspace {
 	/** Spectrum of the whole (residual) signal, recomputed at the start of each pass. */
 	cxRe: Float64Array;
 	cxIm: Float64Array;
@@ -247,95 +247,213 @@ export function decode(
 	samples: Float32Array | Float64Array,
 	options: DecodeOptions = {},
 ): DecodedMessage[] {
-	const sampleRate = options.sampleRate ?? SAMPLE_RATE;
+	const { nfa, nfb, npass, params } = resolveDecodeSettings(options);
+	const history = options.history;
+	const slot = historySlot(options);
+	const previous = history?.beginSlot(slot) ?? [];
+
+	const dd = prepareSamples(samples, options.sampleRate ?? SAMPLE_RATE);
+	const workspace = createDecodeWorkspace();
+	const collector = new DecodeCollector(history, slot);
+	let sbase: Float64Array = new Float64Array(NH1 + 1);
+
+	for (let ipass = 1; ipass <= npass; ipass++) {
+		if (ipass === 3 && collector.decoded.length === 0) break;
+		const pass = runPass(dd, nfa, nfb, ipass, params, workspace);
+		sbase = pass.sbase;
+		for (const d of pass.decodes) collector.add(toDecodedMessage(d));
+	}
+
+	// a7: stations decoded 30 s earlier, looked for in the residual signal.
+	if (history && params.depth >= 3 && previous.length > 0) {
+		computeLongSpectrum(dd, workspace);
+		for (const entry of previous) {
+			if (history.supersedes(slot, entry)) continue;
+			const result = runA7Entry(entry, sbase, workspace);
+			if (result) collector.add(result);
+		}
+	}
+
+	return collector.decoded;
+}
+
+// ── Building blocks shared with the multi-threaded decoder (parallel.ts) ────
+
+/** Settings of one decode that apply to every pass. */
+export interface PassParams {
+	depth: number;
+	syncmin: number;
+	maxCandidates: number;
+	contest: FT8Contest | undefined;
+	book: HashCallBook | undefined;
+}
+
+/** A decode of `runPass`, with what is needed to subtract its signal elsewhere. */
+export interface PassDecode extends DecodedMessage {
+	tones: number[];
+	/** Base frequency (Hz) of the subtracted signal (equals `freq`) */
+	freq: number;
+	/** Start time (s) used for signal subtraction */
+	dtSubtract: number;
+}
+
+/** Resolves the options into the band, number of passes and pass settings. */
+export function resolveDecodeSettings(options: DecodeOptions): {
+	nfa: number;
+	nfb: number;
+	npass: number;
+	params: PassParams;
+} {
 	const nfa = options.freqLow ?? 200;
 	const nfb = options.freqHigh ?? 3000;
 	// Depths above 3 are accepted and behave like 3.
 	const depth = Math.min(options.depth ?? 2, 3);
-	const syncmin = options.syncMin ?? (depth <= 2 ? 2.1 : 1.3);
-	const maxCandidates = options.maxCandidates ?? 1000;
-	const book = options.hashCallBook;
-	const contest = options.contest;
-	const history = options.history;
-	if (history && options.slotStart === undefined) {
+	const params: PassParams = {
+		depth,
+		syncmin: options.syncMin ?? (depth <= 2 ? 2.1 : 1.3),
+		maxCandidates: options.maxCandidates ?? 1000,
+		contest: options.contest,
+		book: options.hashCallBook,
+	};
+	return { nfa, nfb, npass: depth <= 1 ? 2 : 3, params };
+}
+
+/** Slot number of the decode, checking that `slotStart` comes with `history`. */
+export function historySlot(options: DecodeOptions): number {
+	if (options.history && options.slotStart === undefined) {
 		throw new TypeError("decodeFT8: `slotStart` is required when `history` is given");
 	}
-	const slot = options.slotStart === undefined ? 0 : slotNumber(options.slotStart);
-	const previous = history?.beginSlot(slot) ?? [];
+	return options.slotStart === undefined ? 0 : slotNumber(options.slotStart);
+}
 
-	const dd =
-		sampleRate === SAMPLE_RATE
-			? copySamplesToDecodeWindow(samples)
-			: resample(samples, sampleRate, SAMPLE_RATE, NMAX);
+/** The 15 s decode window at 12 kHz. */
+export function prepareSamples(
+	samples: Float32Array | Float64Array,
+	sampleRate: number,
+): Float64Array {
+	return sampleRate === SAMPLE_RATE
+		? copySamplesToDecodeWindow(samples)
+		: resample(samples, sampleRate, SAMPLE_RATE, NMAX);
+}
 
-	const workspace = createDecodeWorkspace();
-	const decoded: DecodedMessage[] = [];
-	const seenMessages = new Set<string>();
-	/** Adds a decode unless its message was already decoded, and saves it for a7. */
-	const addDecode = (d: DecodedMessage): void => {
+/** Collects decodes, dropping repeated messages, and saves them for a7. */
+export class DecodeCollector {
+	readonly decoded: DecodedMessage[] = [];
+	private readonly seenMessages = new Set<string>();
+
+	constructor(
+		private readonly history: FT8History | undefined,
+		private readonly slot: number,
+	) {}
+
+	add(d: DecodedMessage): void {
 		const messageKey = normalizeMessageKey(d.msg);
-		if (seenMessages.has(messageKey)) return;
-		seenMessages.add(messageKey);
-		decoded.push(d);
-		history?.save(slot, d.dt, d.freq, d.msg);
-	};
-	let sbase: Float64Array = new Float64Array(NH1 + 1);
-
-	const npass = depth <= 1 ? 2 : 3;
-	for (let ipass = 1; ipass <= npass; ipass++) {
-		// Pass 1 uses amplitude bit metrics, later passes power metrics.
-		const imetric = ipass === 1 ? 1 : 2;
-		if (ipass === 3 && decoded.length === 0) break;
-
-		const sync = sync8(dd, nfa, nfb, syncmin, maxCandidates);
-		const candidates = sync.candidates;
-		sbase = sync.sbase;
-		computeLongSpectrum(dd, workspace);
-		// Bands [lo, hi] (Hz) of signals subtracted since the spectrum was computed.
-		const staleBands: number[] = [];
-
-		for (const cand of candidates) {
-			// WSJT-X keeps using the spectrum computed at the start of the pass. A
-			// candidate overlapping a just-subtracted signal would then re-decode
-			// that signal (and subtract it a second time with worse parameters),
-			// so refresh the spectrum first.
-			if (overlapsBands(cand.freq, staleBands)) {
-				computeLongSpectrum(dd, workspace);
-				staleBands.length = 0;
-			}
-
-			const ibin = Math.max(1, Math.round(cand.freq / SYNC_DF));
-			const xbase = 10.0 ** (0.1 * (sbase[ibin]! - 40.0));
-			const result = ft8b(cand.freq, cand.dt, xbase, depth, imetric, contest, book, workspace);
-			if (!result) continue;
-
-			subtractft8(dd, result.tones, result.freq, result.dtSubtract, workspace);
-			staleBands.push(result.freq - SIGNAL_BAND_BELOW, result.freq + SIGNAL_BAND_ABOVE);
-
-			addDecode({
-				freq: result.freq,
-				dt: result.dt - 0.5,
-				snr: result.snr,
-				msg: result.msg,
-				sync: cand.sync,
-				...(result.ap ? { ap: result.ap } : {}),
-			});
-		}
+		if (this.seenMessages.has(messageKey)) return;
+		this.seenMessages.add(messageKey);
+		this.decoded.push(d);
+		this.history?.save(this.slot, d.dt, d.freq, d.msg);
 	}
+}
 
-	// a7: stations decoded 30 s earlier, looked for in the residual signal.
-	if (history && depth >= 3 && previous.length > 0) {
-		computeLongSpectrum(dd, workspace);
-		for (const entry of previous) {
-			if (history.supersedes(slot, entry)) continue;
-			const ibin = Math.max(1, Math.round(entry.freq / SYNC_DF));
-			const xbase = 10.0 ** (0.1 * (sbase[ibin]! - 40.0));
-			const result = ft8a7d(entry, xbase, workspace);
-			if (result) addDecode({ ...result, sync: 0, ap: 7 });
+export function toDecodedMessage(d: PassDecode): DecodedMessage {
+	const { tones: _tones, dtSubtract: _dtSubtract, ...message } = d;
+	return message;
+}
+
+/**
+ * One decoding pass over [nfa, nfb] Hz: find candidates, decode them and
+ * subtract each decoded signal from `dd`. Returns the decodes in order,
+ * including repeated messages, and the spectrum baseline.
+ */
+export function runPass(
+	dd: Float64Array,
+	nfa: number,
+	nfb: number,
+	ipass: number,
+	params: PassParams,
+	workspace: DecodeWorkspace,
+): { decodes: PassDecode[]; sbase: Float64Array } {
+	// Pass 1 uses amplitude bit metrics, later passes power metrics.
+	const imetric = ipass === 1 ? 1 : 2;
+	const { candidates, sbase } = sync8(dd, nfa, nfb, params.syncmin, params.maxCandidates);
+	computeLongSpectrum(dd, workspace);
+	// Bands [lo, hi] (Hz) of signals subtracted since the spectrum was computed.
+	const staleBands: number[] = [];
+	const decodes: PassDecode[] = [];
+
+	for (const cand of candidates) {
+		// WSJT-X keeps using the spectrum computed at the start of the pass. A
+		// candidate overlapping a just-subtracted signal would then re-decode
+		// that signal (and subtract it a second time with worse parameters),
+		// so refresh the spectrum first.
+		if (overlapsBands(cand.freq, staleBands)) {
+			computeLongSpectrum(dd, workspace);
+			staleBands.length = 0;
 		}
-	}
 
-	return decoded;
+		const ibin = Math.max(1, Math.round(cand.freq / SYNC_DF));
+		const xbase = 10.0 ** (0.1 * (sbase[ibin]! - 40.0));
+		const result = ft8b(
+			cand.freq,
+			cand.dt,
+			xbase,
+			params.depth,
+			imetric,
+			params.contest,
+			params.book,
+			workspace,
+		);
+		if (!result) continue;
+
+		subtractft8(dd, result.tones, result.freq, result.dtSubtract, workspace);
+		staleBands.push(result.freq - SIGNAL_BAND_BELOW, result.freq + SIGNAL_BAND_ABOVE);
+
+		decodes.push({
+			freq: result.freq,
+			dt: result.dt - 0.5,
+			snr: result.snr,
+			msg: result.msg,
+			sync: cand.sync,
+			...(result.ap ? { ap: result.ap } : {}),
+			tones: result.tones,
+			dtSubtract: result.dtSubtract,
+		});
+	}
+	return { decodes, sbase };
+}
+
+/**
+ * Whether a signal at `freq` Hz can affect decoding in [nfa, nfb] Hz: whether
+ * it lies within reach of the spectra that sync8 and ft8b read for candidates
+ * in the band, with one tone spacing to spare.
+ */
+export function affectsBand(freq: number, nfa: number, nfb: number): boolean {
+	const reach = SIGNAL_BAND_ABOVE + SEARCH_FREQ_HALF * SEARCH_FREQ_STEP + DOWNSAMPLE_BAUD;
+	return freq + SIGNAL_BAND_ABOVE > nfa - reach && freq - SIGNAL_BAND_BELOW < nfb + reach;
+}
+
+/** Subtracts signals decoded elsewhere (by another thread) from `dd`. */
+export function subtractDecodes(
+	dd: Float64Array,
+	decodes: readonly PassDecode[],
+	workspace: DecodeWorkspace,
+): void {
+	for (const d of decodes) subtractft8(dd, d.tones, d.freq, d.dtSubtract, workspace);
+}
+
+/**
+ * a7 decode of one entry saved 30 s earlier. The spectrum of the residual
+ * signal must have been computed into the workspace (`computeLongSpectrum`).
+ */
+export function runA7Entry(
+	entry: A7Entry,
+	sbase: Float64Array,
+	workspace: DecodeWorkspace,
+): DecodedMessage | null {
+	const ibin = Math.max(1, Math.round(entry.freq / SYNC_DF));
+	const xbase = 10.0 ** (0.1 * (sbase[ibin]! - 40.0));
+	const result = ft8a7d(entry, xbase, workspace);
+	return result ? { ...result, sync: 0, ap: 7 } : null;
 }
 
 function normalizeMessageKey(msg: string): string {
@@ -353,7 +471,7 @@ function overlapsBands(freq: number, bands: number[]): boolean {
 	return false;
 }
 
-function createDecodeWorkspace(): DecodeWorkspace {
+export function createDecodeWorkspace(): DecodeWorkspace {
 	return {
 		cxRe: new Float64Array(NFFT1_LONG),
 		cxIm: new Float64Array(NFFT1_LONG),
@@ -397,7 +515,7 @@ function copySamplesToDecodeWindow(samples: Float32Array | Float64Array): Float6
 	return out;
 }
 
-function computeLongSpectrum(dd: Float64Array, workspace: DecodeWorkspace): void {
+export function computeLongSpectrum(dd: Float64Array, workspace: DecodeWorkspace): void {
 	const { cxRe, cxIm } = workspace;
 	cxRe.fill(0);
 	cxIm.fill(0);

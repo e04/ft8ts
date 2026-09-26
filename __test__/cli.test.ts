@@ -213,4 +213,26 @@ describe("CLI", () => {
 		expect(stdout).toContain("messages");
 		expect(stdout).toMatch(/\d+ messages/);
 	}, 15_000);
+
+	test("decode --threads decodes in worker threads like one thread", () => {
+		const wavPath = join(__dirname, "ft8", "190227_155815.wav");
+		// Lines are "   dt  snr   freq  message", with the snr "+  3" or "-12".
+		const messages = (stdout: string) =>
+			stdout
+				.split("\n")
+				.map((line) => /^\s*[+-]\d+\.\d\s+[+-]?\s*-?\d+\s+\d+ {2}(.+)$/.exec(line)?.[1])
+				.filter((msg) => msg !== undefined)
+				.sort();
+		const single = runCli(["decode", wavPath, "--depth", "3"]);
+		const threaded = runCli(["decode", wavPath, "--depth", "3", "--threads", "4"]);
+		expect(threaded.status).toBe(0);
+		expect(messages(threaded.stdout)).toEqual(messages(single.stdout));
+		expect(messages(threaded.stdout).length).toBeGreaterThanOrEqual(27);
+	}, 30_000);
+
+	test("decode with invalid --threads exits 1", () => {
+		const { status, stderr } = runCli(["decode", "x.wav", "--threads", "0"]);
+		expect(status).toBe(1);
+		expect(stderr).toContain("Invalid --threads");
+	});
 });

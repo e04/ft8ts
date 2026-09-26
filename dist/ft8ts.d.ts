@@ -7,6 +7,15 @@
  *
  * Mirrors Fortran: save_hash_call, hash10, hash12, hash22, ihashcall
  */
+/** Contents of a `HashCallBook`, as plain data that can be sent to a worker. */
+interface HashCallBookSnapshot {
+    calls10: [number, string][];
+    calls12: [number, string][];
+    hash22: {
+        hash: number;
+        call: string;
+    }[];
+}
 /**
  * Maintains a callsign ↔ hash lookup table for resolving hashed FT8 callsigns.
  *
@@ -42,6 +51,10 @@ declare class HashCallBook {
     lookup22(n22: number): string | null;
     /** Number of entries in the 22-bit hash table. */
     get size(): number;
+    /** The contents of the book, to be restored with `restore`. */
+    snapshot(): HashCallBookSnapshot;
+    /** Replace the contents of the book with a `snapshot`. */
+    restore(snapshot: HashCallBookSnapshot): void;
     /** Remove all stored entries. */
     clear(): void;
 }
@@ -185,8 +198,102 @@ interface DecodeOptions {
  * Input: mono audio samples at `sampleRate` Hz, duration ~15s.
  */
 declare function decode(samples: Float32Array | Float64Array, options?: DecodeOptions): DecodedMessage[];
+/** A decode of `runPass`, with what is needed to subtract its signal elsewhere. */
+interface PassDecode extends DecodedMessage {
+    tones: number[];
+    /** Base frequency (Hz) of the subtracted signal (equals `freq`) */
+    freq: number;
+    /** Start time (s) used for signal subtraction */
+    dtSubtract: number;
+}
 
 declare function encode(msg: string, options?: WaveformOptions): Float32Array;
 
-export { FT8History, HashCallBook, decode$1 as decodeFT4, decode as decodeFT8, encode$1 as encodeFT4, encode as encodeFT8 };
-export type { DecodeOptions$1 as DecodeFT4Options, DecodeOptions, DecodedMessage$1 as DecodedFT4Message, DecodedMessage, FT8Contest };
+type WorkerRequest = {
+    type: "init";
+    /** Decode window at 12 kHz */
+    dd: Float64Array;
+    nfa: number;
+    nfb: number;
+    depth: number;
+    syncmin: number;
+    maxCandidates: number;
+    contest: FT8Contest | undefined;
+    /** Contents of the hash call book, `null` when decoding without one */
+    book: HashCallBookSnapshot | null;
+} | {
+    type: "pass";
+    ipass: number;
+    /** Signals decoded by the other workers since the last request */
+    subtract: PassDecode[];
+    /** Callsigns saved into the hash call books of the other workers */
+    calls: string[];
+} | {
+    type: "a7";
+    subtract: PassDecode[];
+    entries: A7Entry[];
+};
+
+/**
+ * The part of a `Worker` that `FT8DecoderPool` uses. Events are typed loosely
+ * so that a DOM `Worker` fits; `onmessage` receives `{ data: WorkerResponse }`.
+ */
+interface DecoderWorker {
+    postMessage(message: WorkerRequest, transfer: ArrayBuffer[]): void;
+    onmessage: ((event: any) => void) | null;
+    onerror: ((event: any) => void) | null;
+    terminate(): void;
+}
+interface FT8DecoderPoolOptions {
+    /**
+     * Number of decoding threads. The default follows WSJT-X 3 ("auto"): one
+     * less than the number of logical cores for 2-4 cores, two less for 5-8,
+     * three less for 9-15, and 12 for 16 or more.
+     */
+    threads?: number;
+    /**
+     * Creates a decoder worker. By default, `ft8ts-worker.mjs` next to this
+     * module is started as a module Web Worker, or, in Node.js,
+     * `ft8ts-worker-node.mjs` in a worker thread (see `nodeDecoderWorker`).
+     */
+    workerFactory?: () => DecoderWorker | Promise<DecoderWorker>;
+}
+/** Number of decoding threads for `cores` logical cores, as WSJT-X 3 chooses it. */
+declare function defaultThreadCount(cores: number): number;
+/**
+ * Decodes FT8 in several threads at once: Web Workers in browsers,
+ * worker_threads in Node.js. Create one pool and use it for
+ * every slot; the workers are started on first use and kept until
+ * `terminate()`.
+ *
+ * ```ts
+ * const pool = new FT8DecoderPool();
+ * const decoded = await pool.decode(samples, { sampleRate: 48000, depth: 3 });
+ * ```
+ *
+ * Results are those of `decodeFT8` with the same options, up to small
+ * differences: as in WSJT-X, each thread finds candidates in its own
+ * sub-band, and sees the signals decoded by the other threads only from the
+ * next pass on.
+ */
+declare class FT8DecoderPool {
+    readonly threads: number;
+    private readonly workerFactory;
+    private readonly customFactory;
+    private readonly workers;
+    private queue;
+    constructor(options?: FT8DecoderPoolOptions);
+    /**
+     * Decode all FT8 signals in an audio buffer, like `decodeFT8`. Calls are
+     * run one after another. With one thread, or without any kind of worker, the
+     * buffer is decoded on the calling thread.
+     */
+    decode(samples: Float32Array | Float64Array, options?: DecodeOptions): Promise<DecodedMessage[]>;
+    /** Stop the workers. The pool starts new ones if it is used again. */
+    terminate(): void;
+    private run;
+    private canStartWorkers;
+}
+
+export { FT8DecoderPool, FT8History, HashCallBook, decode$1 as decodeFT4, decode as decodeFT8, defaultThreadCount, encode$1 as encodeFT4, encode as encodeFT8 };
+export type { DecodeOptions$1 as DecodeFT4Options, DecodeOptions, DecodedMessage$1 as DecodedFT4Message, DecodedMessage, DecoderWorker, FT8Contest, FT8DecoderPoolOptions, HashCallBookSnapshot };

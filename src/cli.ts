@@ -8,6 +8,7 @@ import {
 	decodeFT8,
 	encodeFT8,
 	type FT8Contest,
+	FT8DecoderPool,
 } from "./index.js";
 import { parseWavBuffer, writeMono16WavFile } from "./util/wav.js";
 
@@ -38,6 +39,7 @@ Decode options:
   --max-candidates <n>  Max candidate signals to decode (default: 1000 for FT8, 200 for FT4)
   --contest <type>  FT8 special operating activity: ${CONTESTS.join(", ")}
                    (without it, "/R" and "TU;" messages are rejected as in WSJT-X)
+  --threads <n|auto>  FT8 decoding threads (default: 1; auto as in WSJT-X 3)
 
 Encode options:
   --out <file>   Output WAV file (default: output.wav)
@@ -52,7 +54,7 @@ function formatMessage(d: DecodedMessage): string {
 	return `${dt.padStart(5)}  ${snr}  ${freq}  ${d.msg}`;
 }
 
-function runDecode(argv: string[]): void {
+async function runDecode(argv: string[]): Promise<void> {
 	if (argv.length === 0) {
 		console.error("Error: missing input file");
 		printUsage();
@@ -62,6 +64,7 @@ function runDecode(argv: string[]): void {
 	const wavFile = argv[0]!;
 	const options: DecodeOptions = {};
 	let mode: "ft8" | "ft4" = "ft8";
+	let threads: number | "auto" = 1;
 
 	for (let i = 1; i < argv.length; i++) {
 		const arg = argv[i]!;
@@ -87,6 +90,18 @@ function runDecode(argv: string[]): void {
 				throw new Error(`Invalid --contest: ${value ?? "(missing)"}. Use ${CONTESTS.join(", ")}`);
 			}
 			options.contest = contest;
+		} else if (arg === "--threads") {
+			const value = argv[++i];
+			const n = Number(value);
+			if (value === "auto") {
+				threads = "auto";
+			} else if (Number.isInteger(n) && n >= 1) {
+				threads = n;
+			} else {
+				throw new Error(
+					`Invalid --threads: ${value ?? "(missing)"}. Use a positive integer or auto`,
+				);
+			}
 		} else {
 			throw new Error(`Unknown argument: ${arg}`);
 		}
@@ -100,12 +115,19 @@ function runDecode(argv: string[]): void {
 		`WAV: ${sampleRate} Hz, ${samples.length} samples, ${(samples.length / sampleRate).toFixed(1)}s`,
 	);
 
+	const pool =
+		mode === "ft8" && threads !== 1
+			? new FT8DecoderPool(threads === "auto" ? {} : { threads })
+			: undefined;
 	const startTime = performance.now();
 	const decoded =
 		mode === "ft4"
 			? decodeFT4(samples, { ...options, sampleRate })
-			: decodeFT8(samples, { ...options, sampleRate });
+			: pool
+				? await pool.decode(samples, { ...options, sampleRate })
+				: decodeFT8(samples, { ...options, sampleRate });
 	const elapsed = performance.now() - startTime;
+	pool?.terminate();
 
 	console.log(`\nDecoded ${decoded.length} messages in ${(elapsed / 1000).toFixed(2)}s:\n`);
 	console.log("   dt  snr   freq  message");
@@ -161,7 +183,7 @@ function runEncode(argv: string[]): void {
 	);
 }
 
-function main(): void {
+async function main(): Promise<void> {
 	const args = process.argv.slice(2);
 	const subcommand = args[0];
 	const subArgs = args.slice(1);
@@ -173,7 +195,7 @@ function main(): void {
 
 	try {
 		if (subcommand === "decode") {
-			runDecode(subArgs);
+			await runDecode(subArgs);
 		} else if (subcommand === "encode") {
 			runEncode(subArgs);
 		} else {
@@ -189,4 +211,4 @@ function main(): void {
 	}
 }
 
-main();
+void main();
